@@ -1,0 +1,22 @@
+[
+  {"query": "What are the latest advances in transformer architectures?", "relevant_chunk_ids": []},
+  {"query": "How does reinforcement learning from human feedback work?", "relevant_chunk_ids": []},
+  {"query": "What is the difference between GPT and BERT?", "relevant_chunk_ids": []},
+  {"query": "Explain diffusion models for image generation", "relevant_chunk_ids": []},
+  {"query": "What are graph neural networks used for?", "relevant_chunk_ids": []},
+  {"query": "How do large language models handle long context?", "relevant_chunk_ids": []},
+  {"query": "What is federated learning and its applications?", "relevant_chunk_ids": []},
+  {"query": "Explain the concept of attention mechanism in neural networks", "relevant_chunk_ids": []},
+  {"query": "What are the challenges of multi-agent reinforcement learning?", "relevant_chunk_ids": []},
+  {"query": "How does contrastive learning work for self-supervised representation?", "relevant_chunk_ids": []},
+  {"query": "What is neural architecture search?", "relevant_chunk_ids": []},
+  {"query": "Explain knowledge distillation in deep learning", "relevant_chunk_ids": []},
+  {"query": "What are vision transformers and how do they compare to CNNs?", "relevant_chunk_ids": []},
+  {"query": "How do mixture of experts models improve efficiency?", "relevant_chunk_ids": []},
+  {"query": "What is prompt engineering for large language models?", "relevant_chunk_ids": []},
+  {"query": "Explain meta-learning and few-shot learning approaches", "relevant_chunk_ids": []},
+  {"query": "What are the ethical considerations in AI development?", "relevant_chunk_ids": []},
+  {"query": "How does transfer learning improve model performance?", "relevant_chunk_ids": []},
+  {"query": "What is the role of normalization in training deep networks?", "relevant_chunk_ids": []},
+  {"query": "Explain the concept of adversarial robustness in machine learning", "relevant_chunk_ids": []}
+]

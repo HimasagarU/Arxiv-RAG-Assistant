@@ -1,0 +1,891 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ArXiv RAG Assistant</title>
+    <meta name="description" content="AI-powered research assistant for ArXiv papers using hybrid RAG retrieval">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        /* ============================================ */
+        /* Design System                                */
+        /* ============================================ */
+        :root {
+            --bg-primary: #0a0a0f;
+            --bg-secondary: #12121a;
+            --bg-card: #1a1a26;
+            --bg-card-hover: #22222f;
+            --bg-input: #16161f;
+            --border: #2a2a3d;
+            --border-focus: #6c5ce7;
+            --text-primary: #e8e8f0;
+            --text-secondary: #8888a8;
+            --text-muted: #5a5a78;
+            --accent: #6c5ce7;
+            --accent-light: #a29bfe;
+            --accent-glow: rgba(108, 92, 231, 0.15);
+            --success: #00cec9;
+            --warning: #fdcb6e;
+            --error: #e17055;
+            --gradient-accent: linear-gradient(135deg, #6c5ce7, #a29bfe);
+            --gradient-bg: linear-gradient(180deg, #0a0a0f 0%, #12121a 100%);
+            --shadow-sm: 0 2px 8px rgba(0,0,0,0.3);
+            --shadow-md: 0 4px 20px rgba(0,0,0,0.4);
+            --shadow-lg: 0 8px 40px rgba(0,0,0,0.5);
+            --shadow-glow: 0 0 30px rgba(108, 92, 231, 0.2);
+            --radius-sm: 8px;
+            --radius-md: 12px;
+            --radius-lg: 16px;
+            --radius-xl: 20px;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Inter', -apple-system, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* ============================================ */
+        /* Layout                                       */
+        /* ============================================ */
+        .app {
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+
+        .header {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(10, 10, 15, 0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+            padding: 16px 24px;
+        }
+
+        .header-inner {
+            max-width: 1100px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo-icon {
+            width: 36px;
+            height: 36px;
+            background: var(--gradient-accent);
+            border-radius: var(--radius-sm);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .logo-text {
+            font-size: 18px;
+            font-weight: 600;
+            letter-spacing: -0.3px;
+        }
+
+        .logo-text span { color: var(--accent-light); }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 500;
+            background: rgba(0, 206, 201, 0.1);
+            color: var(--success);
+            border: 1px solid rgba(0, 206, 201, 0.2);
+            transition: all 0.3s;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+
+        /* ============================================ */
+        /* Main Content                                 */
+        /* ============================================ */
+        .main {
+            flex: 1;
+            max-width: 1100px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 40px 24px;
+        }
+
+        .hero {
+            text-align: center;
+            margin-bottom: 48px;
+        }
+
+        .hero h1 {
+            font-size: 36px;
+            font-weight: 700;
+            letter-spacing: -0.5px;
+            margin-bottom: 12px;
+            background: var(--gradient-accent);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .hero p {
+            font-size: 16px;
+            color: var(--text-secondary);
+            max-width: 560px;
+            margin: 0 auto;
+            line-height: 1.6;
+        }
+
+        /* ============================================ */
+        /* Search Box                                   */
+        /* ============================================ */
+        .search-container {
+            margin-bottom: 36px;
+        }
+
+        .search-box {
+            position: relative;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 6px;
+            transition: all 0.3s;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .search-box:focus-within {
+            border-color: var(--border-focus);
+            box-shadow: var(--shadow-glow);
+        }
+
+        .search-inner {
+            display: flex;
+            gap: 8px;
+            align-items: stretch;
+        }
+
+        .search-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-family: 'Inter', sans-serif;
+            font-size: 15px;
+            padding: 14px 16px;
+            line-height: 1.5;
+        }
+
+        .search-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .search-btn {
+            padding: 12px 28px;
+            background: var(--gradient-accent);
+            color: white;
+            border: none;
+            border-radius: var(--radius-md);
+            font-family: 'Inter', sans-serif;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.25s;
+            white-space: nowrap;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .search-btn:hover { transform: translateY(-1px); box-shadow: var(--shadow-glow); }
+        .search-btn:active { transform: translateY(0); }
+        .search-btn:disabled { opacity: 0.6; cursor: wait; transform: none; }
+
+        .search-options {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+            padding: 12px 8px 0;
+        }
+
+        .search-options label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .search-options select {
+            background: var(--bg-input);
+            color: var(--text-primary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 4px 8px;
+            font-family: 'Inter', sans-serif;
+            font-size: 13px;
+            outline: none;
+        }
+
+        /* ============================================ */
+        /* Sample Queries                               */
+        /* ============================================ */
+        .sample-queries {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: center;
+            margin-bottom: 36px;
+        }
+
+        .sample-query {
+            padding: 8px 16px;
+            border-radius: 20px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            font-size: 13px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .sample-query:hover {
+            background: var(--bg-card-hover);
+            color: var(--accent-light);
+            border-color: var(--accent);
+        }
+
+        /* ============================================ */
+        /* Results                                      */
+        /* ============================================ */
+        .results-section {
+            display: none;
+        }
+
+        .results-section.visible {
+            display: block;
+            animation: fadeIn 0.4s ease;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(12px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        /* Answer Card */
+        .answer-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            padding: 28px;
+            margin-bottom: 24px;
+            box-shadow: var(--shadow-md);
+            position: relative;
+            overflow: hidden;
+        }
+
+        .answer-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--gradient-accent);
+        }
+
+        .answer-label {
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1.2px;
+            color: var(--accent-light);
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .answer-text {
+            font-size: 15px;
+            line-height: 1.75;
+            color: var(--text-primary);
+            white-space: pre-wrap;
+        }
+
+        /* Latency Bar */
+        .latency-bar {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 24px;
+        }
+
+        .latency-chip {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 8px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .latency-chip .value {
+            font-family: 'JetBrains Mono', monospace;
+            font-weight: 500;
+            color: var(--accent-light);
+        }
+
+        .latency-chip.total {
+            background: var(--accent-glow);
+            border-color: var(--accent);
+            color: var(--text-primary);
+        }
+
+        /* Sources */
+        .sources-header {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            margin-bottom: 14px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .source-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-md);
+            padding: 20px;
+            margin-bottom: 12px;
+            transition: all 0.25s;
+            cursor: pointer;
+        }
+
+        .source-card:hover {
+            border-color: var(--accent);
+            background: var(--bg-card-hover);
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-sm);
+        }
+
+        .source-meta {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+
+        .source-rank {
+            width: 26px;
+            height: 26px;
+            border-radius: 6px;
+            background: var(--gradient-accent);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 12px;
+            font-weight: 700;
+            flex-shrink: 0;
+        }
+
+        .source-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-primary);
+            flex: 1;
+        }
+
+        .source-score {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 11px;
+            color: var(--success);
+            background: rgba(0, 206, 201, 0.1);
+            padding: 3px 10px;
+            border-radius: 4px;
+        }
+
+        .source-text {
+            font-size: 13px;
+            line-height: 1.65;
+            color: var(--text-secondary);
+            margin-top: 8px;
+            display: -webkit-box;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        .source-text.expanded {
+            -webkit-line-clamp: unset;
+        }
+
+        .source-tags {
+            display: flex;
+            gap: 6px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .source-tag {
+            font-size: 11px;
+            padding: 2px 8px;
+            border-radius: 4px;
+            background: rgba(108, 92, 231, 0.1);
+            color: var(--accent-light);
+            border: 1px solid rgba(108, 92, 231, 0.2);
+        }
+
+        .source-link {
+            font-size: 12px;
+            color: var(--accent-light);
+            text-decoration: none;
+            margin-top: 8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .source-link:hover { text-decoration: underline; }
+
+        /* ============================================ */
+        /* Loading State                                */
+        /* ============================================ */
+        .loading-overlay {
+            display: none;
+        }
+
+        .loading-overlay.visible {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 20px;
+            padding: 60px 20px;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .loading-text {
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        .loading-steps {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .loading-step {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            transition: color 0.3s;
+        }
+
+        .loading-step.active { color: var(--accent-light); }
+        .loading-step.done { color: var(--success); }
+
+        /* ============================================ */
+        /* Error                                        */
+        /* ============================================ */
+        .error-card {
+            background: rgba(225, 112, 85, 0.1);
+            border: 1px solid rgba(225, 112, 85, 0.3);
+            border-radius: var(--radius-md);
+            padding: 20px;
+            color: var(--error);
+            font-size: 14px;
+            margin-bottom: 24px;
+            display: none;
+        }
+
+        .error-card.visible { display: block; animation: fadeIn 0.3s; }
+
+        /* ============================================ */
+        /* Footer                                       */
+        /* ============================================ */
+        .footer {
+            text-align: center;
+            padding: 24px;
+            border-top: 1px solid var(--border);
+            font-size: 13px;
+            color: var(--text-muted);
+        }
+
+        .footer a { color: var(--accent-light); text-decoration: none; }
+        .footer a:hover { text-decoration: underline; }
+
+        /* ============================================ */
+        /* Responsive                                   */
+        /* ============================================ */
+        @media (max-width: 640px) {
+            .hero h1 { font-size: 26px; }
+            .search-inner { flex-direction: column; }
+            .search-btn { width: 100%; justify-content: center; }
+            .latency-bar { gap: 8px; }
+            .source-meta { gap: 8px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-inner">
+                <div class="logo">
+                    <div class="logo-icon">A</div>
+                    <div class="logo-text">ArXiv <span>RAG</span></div>
+                </div>
+                <div class="status-badge" id="statusBadge">
+                    <div class="status-dot"></div>
+                    <span id="statusText">Connecting...</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main -->
+        <main class="main">
+            <!-- Hero -->
+            <section class="hero">
+                <h1>Research Paper Assistant</h1>
+                <p>Ask questions about AI & ML research. Powered by hybrid retrieval with semantic search, BM25, and cross-encoder reranking.</p>
+            </section>
+
+            <!-- Search -->
+            <section class="search-container">
+                <div class="search-box">
+                    <div class="search-inner">
+                        <input
+                            type="text"
+                            class="search-input"
+                            id="queryInput"
+                            placeholder="Ask a research question..."
+                            autocomplete="off"
+                        />
+                        <button class="search-btn" id="searchBtn" onclick="submitQuery()">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+                                <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+                            </svg>
+                            Search
+                        </button>
+                    </div>
+                    <div class="search-options">
+                        <label>
+                            Results:
+                            <select id="topK">
+                                <option value="3">3</option>
+                                <option value="5" selected>5</option>
+                                <option value="10">10</option>
+                            </select>
+                        </label>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Sample Queries -->
+            <section class="sample-queries" id="sampleQueries">
+                <div class="sample-query" onclick="useSample(this)">What are transformer architectures?</div>
+                <div class="sample-query" onclick="useSample(this)">How does RLHF work?</div>
+                <div class="sample-query" onclick="useSample(this)">Explain diffusion models</div>
+                <div class="sample-query" onclick="useSample(this)">Vision transformers vs CNNs</div>
+                <div class="sample-query" onclick="useSample(this)">Mixture of experts models</div>
+                <div class="sample-query" onclick="useSample(this)">Knowledge distillation techniques</div>
+            </section>
+
+            <!-- Error -->
+            <div class="error-card" id="errorCard"></div>
+
+            <!-- Loading -->
+            <div class="loading-overlay" id="loadingOverlay">
+                <div class="loading-spinner"></div>
+                <div class="loading-text">Searching ArXiv papers...</div>
+                <div class="loading-steps">
+                    <div class="loading-step active" id="stepDense">⟳ Dense retrieval (semantic search)</div>
+                    <div class="loading-step" id="stepBM25">○ BM25 retrieval (keyword match)</div>
+                    <div class="loading-step" id="stepRerank">○ Cross-encoder reranking</div>
+                    <div class="loading-step" id="stepGenerate">○ Generating answer</div>
+                </div>
+            </div>
+
+            <!-- Results -->
+            <section class="results-section" id="resultsSection">
+                <!-- Latency -->
+                <div class="latency-bar" id="latencyBar"></div>
+
+                <!-- Answer -->
+                <div class="answer-card">
+                    <div class="answer-label">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/>
+                        </svg>
+                        AI Answer
+                    </div>
+                    <div class="answer-text" id="answerText"></div>
+                </div>
+
+                <!-- Sources -->
+                <div class="sources-header">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/>
+                    </svg>
+                    <span id="sourcesCount">Sources</span>
+                </div>
+                <div id="sourcesList"></div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            ArXiv RAG Assistant · Hybrid Dense + BM25 + Cross-Encoder · Powered by
+            <a href="https://groq.com" target="_blank">Groq</a> &
+            <a href="https://arxiv.org" target="_blank">ArXiv API</a>
+        </footer>
+    </div>
+
+    <script>
+        // ============================================
+        // Config
+        // ============================================
+        const API_BASE = 'http://localhost:8000';
+
+        // ============================================
+        // DOM Refs
+        // ============================================
+        const queryInput = document.getElementById('queryInput');
+        const searchBtn = document.getElementById('searchBtn');
+        const topKSelect = document.getElementById('topK');
+        const loadingOverlay = document.getElementById('loadingOverlay');
+        const resultsSection = document.getElementById('resultsSection');
+        const errorCard = document.getElementById('errorCard');
+        const answerText = document.getElementById('answerText');
+        const sourcesList = document.getElementById('sourcesList');
+        const sourcesCount = document.getElementById('sourcesCount');
+        const latencyBar = document.getElementById('latencyBar');
+        const statusBadge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        const sampleQueries = document.getElementById('sampleQueries');
+
+        // ============================================
+        // Health Check
+        // ============================================
+        async function checkHealth() {
+            try {
+                const resp = await fetch(`${API_BASE}/health`);
+                const data = await resp.json();
+                statusText.textContent = `${data.chroma_docs.toLocaleString()} docs indexed`;
+                statusBadge.style.borderColor = 'rgba(0, 206, 201, 0.3)';
+            } catch (e) {
+                statusText.textContent = 'API Offline';
+                statusBadge.style.background = 'rgba(225, 112, 85, 0.1)';
+                statusBadge.style.color = '#e17055';
+                statusBadge.style.borderColor = 'rgba(225, 112, 85, 0.3)';
+                document.querySelector('.status-dot').style.background = '#e17055';
+            }
+        }
+        checkHealth();
+
+        // ============================================
+        // Submit Query
+        // ============================================
+        queryInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submitQuery();
+            }
+        });
+
+        async function submitQuery() {
+            const query = queryInput.value.trim();
+            if (!query) return;
+
+            const topK = parseInt(topKSelect.value);
+
+            // UI State: Loading
+            searchBtn.disabled = true;
+            errorCard.classList.remove('visible');
+            resultsSection.classList.remove('visible');
+            loadingOverlay.classList.add('visible');
+            sampleQueries.style.display = 'none';
+
+            // Animate loading steps
+            animateLoadingSteps();
+
+            try {
+                const resp = await fetch(`${API_BASE}/query`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ query, top_k: topK }),
+                });
+
+                if (!resp.ok) {
+                    const errData = await resp.json().catch(() => ({}));
+                    throw new Error(errData.detail || `HTTP ${resp.status}`);
+                }
+
+                const data = await resp.json();
+                renderResults(data);
+
+            } catch (err) {
+                errorCard.textContent = `⚠ Error: ${err.message}. Make sure the API server is running on ${API_BASE}`;
+                errorCard.classList.add('visible');
+            } finally {
+                loadingOverlay.classList.remove('visible');
+                searchBtn.disabled = false;
+            }
+        }
+
+        // ============================================
+        // Loading Animation
+        // ============================================
+        function animateLoadingSteps() {
+            const steps = ['stepDense', 'stepBM25', 'stepRerank', 'stepGenerate'];
+            const delays = [0, 400, 900, 1500];
+
+            steps.forEach((id, i) => {
+                const el = document.getElementById(id);
+                el.className = 'loading-step';
+                el.textContent = (i === 0 ? '⟳ ' : '○ ') + el.textContent.substring(2);
+            });
+
+            steps.forEach((id, i) => {
+                setTimeout(() => {
+                    const el = document.getElementById(id);
+                    el.classList.add('active');
+                    el.textContent = '⟳ ' + el.textContent.substring(2);
+
+                    if (i > 0) {
+                        const prev = document.getElementById(steps[i - 1]);
+                        prev.classList.remove('active');
+                        prev.classList.add('done');
+                        prev.textContent = '✓ ' + prev.textContent.substring(2);
+                    }
+                }, delays[i]);
+            });
+        }
+
+        // ============================================
+        // Render Results
+        // ============================================
+        function renderResults(data) {
+            // Latency bar
+            const trace = data.retrieval_trace || {};
+            latencyBar.innerHTML = `
+                <div class="latency-chip total">
+                    Total <span class="value">${data.latency_ms.toFixed(0)}ms</span>
+                </div>
+                <div class="latency-chip">
+                    Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span>
+                </div>
+                <div class="latency-chip">
+                    BM25 <span class="value">${(trace.bm25_ms || 0).toFixed(0)}ms</span>
+                </div>
+                <div class="latency-chip">
+                    Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span>
+                </div>
+                <div class="latency-chip">
+                    LLM <span class="value">${(trace.generation_ms || 0).toFixed(0)}ms</span>
+                </div>
+            `;
+
+            // Answer
+            answerText.textContent = data.answer;
+
+            // Sources
+            const sources = data.sources || [];
+            sourcesCount.textContent = `${sources.length} Sources Retrieved`;
+
+            sourcesList.innerHTML = sources.map((s, i) => {
+                const categories = (s.categories || '').split(',').filter(c => c.trim()).slice(0, 4);
+                const tags = categories.map(c => `<span class="source-tag">${c.trim()}</span>`).join('');
+                const arxivLink = s.paper_id ? `https://arxiv.org/abs/${s.paper_id}` : '#';
+
+                return `
+                    <div class="source-card" onclick="toggleSource(this)">
+                        <div class="source-meta">
+                            <div class="source-rank">${i + 1}</div>
+                            <div class="source-title">${escapeHtml(s.title)}</div>
+                            <div class="source-score">score: ${s.rerank_score.toFixed(3)}</div>
+                        </div>
+                        <div class="source-text">${escapeHtml(s.chunk_text)}</div>
+                        <div class="source-tags">
+                            ${tags}
+                            <a class="source-link" href="${arxivLink}" target="_blank" onclick="event.stopPropagation()">
+                                View on ArXiv →
+                            </a>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+
+            resultsSection.classList.add('visible');
+        }
+
+        // ============================================
+        // Helpers
+        // ============================================
+        function useSample(el) {
+            queryInput.value = el.textContent;
+            submitQuery();
+        }
+
+        function toggleSource(el) {
+            const textEl = el.querySelector('.source-text');
+            textEl.classList.toggle('expanded');
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+    </script>
+</body>
+</html>

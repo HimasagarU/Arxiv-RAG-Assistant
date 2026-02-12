@@ -1,0 +1,205 @@
+"""
+evaluate.py — Retrieval evaluation metrics: Recall@K, MRR, nDCG@K, Precision@K.
+
+Usage:
+    conda run -n pytorch python rerank/evaluate.py --queries tests/queries.jsonl
+"""
+
+import argparse
+import json
+import logging
+import math
+import os
+import sys
+import time
+
+from dotenv import load_dotenv
+
+# Add project root to path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+def recall_at_k(retrieved_ids: list[str], relevant_ids: list[str], k: int) -> float:
+    """Fraction of relevant docs found in top-K retrieved."""
+    if not relevant_ids:
+        return 0.0
+    top_k = set(retrieved_ids[:k])
+    hits = len(top_k & set(relevant_ids))
+    return hits / len(relevant_ids)
+
+
+def precision_at_k(retrieved_ids: list[str], relevant_ids: list[str], k: int) -> float:
+    """Fraction of top-K that are relevant."""
+    if k == 0:
+        return 0.0
+    top_k = retrieved_ids[:k]
+    hits = sum(1 for doc_id in top_k if doc_id in set(relevant_ids))
+    return hits / k
+
+
+def reciprocal_rank(retrieved_ids: list[str], relevant_ids: list[str]) -> float:
+    """1 / rank of first relevant result (0 if none found)."""
+    relevant_set = set(relevant_ids)
+    for i, doc_id in enumerate(retrieved_ids):
+        if doc_id in relevant_set:
+            return 1.0 / (i + 1)
+    return 0.0
+
+
+def ndcg_at_k(retrieved_ids: list[str], relevant_ids: list[str], k: int) -> float:
+    """Normalized Discounted Cumulative Gain at K (binary relevance)."""
+    relevant_set = set(relevant_ids)
+
+    # DCG
+    dcg = 0.0
+    for i, doc_id in enumerate(retrieved_ids[:k]):
+        rel = 1.0 if doc_id in relevant_set else 0.0
+        dcg += rel / math.log2(i + 2)  # i+2 because log2(1)=0
+
+    # Ideal DCG
+    ideal_rels = min(len(relevant_ids), k)
+    idcg = sum(1.0 / math.log2(i + 2) for i in range(ideal_rels))
+
+    if idcg == 0:
+        return 0.0
+    return dcg / idcg
+
+
+# ---------------------------------------------------------------------------
+# Evaluation runner
+# ---------------------------------------------------------------------------
+
+def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
+    """
+    Run evaluation on a set of queries.
+
+    Args:
+        queries_path: Path to JSONL file with 'query' and 'relevant_chunk_ids' fields.
+        retrieval_fn: Function that takes a query string and returns list of chunk IDs.
+                      If None, performs a dry-run evaluation with mock data.
+        k_values: List of K values to compute metrics for.
+
+    Returns:
+        Dict of aggregated metrics.
+    """
+    if k_values is None:
+        k_values = [5, 10, 20]
+
+    # Load queries
+    queries = []
+    with open(queries_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                queries.append(json.loads(line))
+
+    log.info(f"Loaded {len(queries)} evaluation queries")
+
+    # Run evaluation
+    results = {f"recall@{k}": [] for k in k_values}
+    results.update({f"precision@{k}": [] for k in k_values})
+    results.update({f"ndcg@{k}": [] for k in k_values})
+    results["mrr"] = []
+    per_query = []
+
+    for q in queries:
+        query_text = q["query"]
+        relevant = q.get("relevant_chunk_ids", [])
+
+        if retrieval_fn:
+            start = time.time()
+            retrieved = retrieval_fn(query_text)
+            latency_ms = (time.time() - start) * 1000
+        else:
+            retrieved = []
+            latency_ms = 0
+
+        qr = {"query": query_text, "latency_ms": latency_ms}
+
+        for k in k_values:
+            r_at_k = recall_at_k(retrieved, relevant, k)
+            p_at_k = precision_at_k(retrieved, relevant, k)
+            n_at_k = ndcg_at_k(retrieved, relevant, k)
+            results[f"recall@{k}"].append(r_at_k)
+            results[f"precision@{k}"].append(p_at_k)
+            results[f"ndcg@{k}"].append(n_at_k)
+            qr[f"recall@{k}"] = r_at_k
+            qr[f"precision@{k}"] = p_at_k
+            qr[f"ndcg@{k}"] = n_at_k
+
+        mrr = reciprocal_rank(retrieved, relevant)
+        results["mrr"].append(mrr)
+        qr["mrr"] = mrr
+        per_query.append(qr)
+
+    # Aggregate
+    aggregated = {}
+    for metric, values in results.items():
+        if values:
+            aggregated[metric] = sum(values) / len(values)
+        else:
+            aggregated[metric] = 0.0
+
+    return aggregated, per_query
+
+
+def print_results(aggregated: dict, per_query: list):
+    """Pretty-print evaluation results."""
+    print("\n" + "=" * 60)
+    print("RETRIEVAL EVALUATION RESULTS")
+    print("=" * 60)
+
+    for metric, value in sorted(aggregated.items()):
+        print(f"  {metric:20s}: {value:.4f}")
+
+    if per_query:
+        latencies = [q["latency_ms"] for q in per_query if q["latency_ms"] > 0]
+        if latencies:
+            print(f"\n  {'avg_latency_ms':20s}: {sum(latencies)/len(latencies):.1f}")
+            print(f"  {'p95_latency_ms':20s}: {sorted(latencies)[int(len(latencies)*0.95)]:.1f}")
+
+    print("=" * 60 + "\n")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate retrieval metrics")
+    parser.add_argument("--queries", type=str, default="tests/queries.jsonl",
+                        help="Path to queries JSONL")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Output JSON path for per-query results")
+    args = parser.parse_args()
+
+    if not os.path.exists(args.queries):
+        log.error(f"Queries file not found: {args.queries}")
+        log.info("Create a queries.jsonl file with 'query' and 'relevant_chunk_ids' fields.")
+        return
+
+    # Dry-run (no retrieval function) — just validates query format
+    aggregated, per_query = evaluate_retrieval(args.queries)
+    print_results(aggregated, per_query)
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump({"aggregated": aggregated, "per_query": per_query}, f, indent=2)
+        log.info(f"Results saved → {args.output}")
+
+
+if __name__ == "__main__":
+    main()

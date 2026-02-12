@@ -1,0 +1,40 @@
+# ArXiv RAG Assistant - Default Hyperparameters
+
+# --- Chunking ---
+chunking:
+  chunk_size_tokens: 300
+  overlap_fraction: 0.2
+
+# --- Embedding ---
+embedding:
+  model: "all-MiniLM-L6-v2"
+  batch_size: 64
+  device: "cuda"  # "cuda" or "cpu"
+
+# --- BM25 ---
+bm25:
+  remove_stopwords: true
+  lowercase: true
+
+# --- Retrieval ---
+retrieval:
+  k_dense: 50
+  k_lex: 50
+  merge_top_m: 20
+  final_top_n: 5
+  alpha: 0.7  # weight for dense scores
+  beta: 0.3   # weight for BM25 scores
+
+# --- Reranker ---
+reranker:
+  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  batch_size: 32
+  device: "cuda"
+
+# --- Ingestion ---
+ingestion:
+  categories:
+    - "cs.AI"
+    - "cs.LG"
+  max_papers: 5000
+  results_per_page: 100

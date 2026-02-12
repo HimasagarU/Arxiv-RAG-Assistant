@@ -1,0 +1,25 @@
+
+# System
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+.env
+.ipynb_checkpoints/
+
+# Project Specific
+Implementation_guide.md
+data/
+logs/
+.idea/
+.vscode/
+
+# Ignore sensitive files
+*.key
+*.pem
