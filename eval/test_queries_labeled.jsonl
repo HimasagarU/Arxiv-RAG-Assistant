@@ -1,0 +1,20 @@
+{"query": "What are the latest advances in transformer architectures?", "relevant_chunk_ids": ["2601.20696_chunk_0", "2601.21641_chunk_0", "2602.06909_chunk_0"]}
+{"query": "How does reinforcement learning from human feedback work?", "relevant_chunk_ids": ["2601.22664_chunk_0", "2602.02530_chunk_0", "2601.22900_chunk_0"]}
+{"query": "What is the difference between GPT and BERT?", "relevant_chunk_ids": ["2602.09464_chunk_1", "2602.00393_chunk_1", "2601.19197_chunk_1"]}
+{"query": "Explain diffusion models for image generation", "relevant_chunk_ids": ["2602.02114_chunk_0", "2602.07022_chunk_0", "2601.18932_chunk_0"]}
+{"query": "What are graph neural networks used for?", "relevant_chunk_ids": ["2601.21882_chunk_0", "2602.06557_chunk_0", "2602.00753_chunk_0"]}
+{"query": "How do large language models handle long context?", "relevant_chunk_ids": ["2602.04607_chunk_0", "2602.08382_chunk_0", "2602.07962_chunk_0"]}
+{"query": "What is federated learning and its applications?", "relevant_chunk_ids": ["2602.01185_chunk_0", "2602.10595_chunk_0", "2602.05693_chunk_0"]}
+{"query": "Explain the concept of attention mechanism in neural networks", "relevant_chunk_ids": ["2602.04872_chunk_0", "2602.07378_chunk_0", "2602.02422_chunk_0"]}
+{"query": "What are the challenges of multi-agent reinforcement learning?", "relevant_chunk_ids": ["2602.02858_chunk_0", "2601.22292_chunk_0", "2602.08335_chunk_0"]}
+{"query": "How does contrastive learning work for self-supervised representation?", "relevant_chunk_ids": ["2602.02381_chunk_0", "2602.09764_chunk_0", "2602.04881_chunk_0"]}
+{"query": "What is neural architecture search?", "relevant_chunk_ids": ["2602.00240_chunk_0", "2602.10854_chunk_0", "2601.19766_chunk_0"]}
+{"query": "Explain knowledge distillation in deep learning", "relevant_chunk_ids": ["2602.01265_chunk_0", "2602.04703_chunk_0", "2601.18909_chunk_0"]}
+{"query": "What are vision transformers and how do they compare to CNNs?", "relevant_chunk_ids": ["2602.06300_chunk_0", "2602.00141_chunk_0", "2601.19884_chunk_0"]}
+{"query": "How do mixture of experts models improve efficiency?", "relevant_chunk_ids": ["2602.07265_chunk_0", "2602.08019_chunk_0", "2602.06154_chunk_0"]}
+{"query": "What is prompt engineering for large language models?", "relevant_chunk_ids": ["2602.01711_chunk_0", "2601.22921_chunk_0", "2602.04297_chunk_0"]}
+{"query": "Explain meta-learning and few-shot learning approaches", "relevant_chunk_ids": ["2602.01936_chunk_0", "2602.01427_chunk_0", "2602.00114_chunk_0"]}
+{"query": "What are the ethical considerations in AI development?", "relevant_chunk_ids": ["2602.04616_chunk_0", "2602.07071_chunk_0", "2602.07754_chunk_0"]}
+{"query": "How does transfer learning improve model performance?", "relevant_chunk_ids": ["2602.02358_chunk_0", "2602.01614_chunk_1", "2602.00957_chunk_0"]}
+{"query": "What is the role of normalization in training deep networks?", "relevant_chunk_ids": ["2601.22580_chunk_0", "2602.05779_chunk_0", "2602.03879_chunk_1"]}
+{"query": "Explain the concept of adversarial robustness in machine learning", "relevant_chunk_ids": ["2602.06395_chunk_0", "2602.02626_chunk_0", "2602.09848_chunk_0"]}
