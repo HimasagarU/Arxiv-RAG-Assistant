@@ -191,8 +191,16 @@ def main():
         log.info("Create a queries.jsonl file with 'query' and 'relevant_chunk_ids' fields.")
         return
 
-    # Dry-run (no retrieval function) — just validates query format
-    aggregated, per_query = evaluate_retrieval(args.queries)
+    from api.retrieval import HybridRetriever
+    
+    log.info("Loading Hybrid Retriever...")
+    retriever = HybridRetriever()
+    
+    def retrieval_fn(q):
+        res = retriever.retrieve(q, top_n=20)
+        return [p["chunk_id"] for p in res["passages"]]
+        
+    aggregated, per_query = evaluate_retrieval(args.queries, retrieval_fn=retrieval_fn)
     print_results(aggregated, per_query)
 
     if args.output:

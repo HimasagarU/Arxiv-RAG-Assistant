@@ -6,7 +6,7 @@ echo ============================================
 
 echo.
 echo [1/2] Fetching papers from ArXiv API...
-conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 5000
+conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 10000
 
 echo.
 echo [2/2] Chunking papers...

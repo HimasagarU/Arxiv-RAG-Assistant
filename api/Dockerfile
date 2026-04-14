@@ -10,10 +10,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY api/ api/
 COPY rerank/ rerank/
 COPY index/params.yaml index/params.yaml
-COPY .env .env
 
-# Data will be mounted as volumes
-# VOLUME /app/data
+# Copy frontend UI
+COPY frontend/ frontend/
+
+# Copy pre-computed index data (since it is small ~80MB, we can bake it into the image)
+COPY data/ data/
 
 EXPOSE 8000
 

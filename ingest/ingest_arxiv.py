@@ -27,7 +27,7 @@ load_dotenv()
 
 ARXIV_API_URL = "http://export.arxiv.org/api/query"
 DEFAULT_CATEGORIES = os.getenv("ARXIV_CATEGORIES", "cs.AI,cs.LG")
-DEFAULT_MAX_PAPERS = int(os.getenv("MAX_PAPERS", "5000"))
+DEFAULT_MAX_PAPERS = int(os.getenv("MAX_PAPERS", "10000"))
 DEFAULT_DB_PATH = os.getenv("DB_PATH", "data/arxiv_papers.db")
 RESULTS_PER_PAGE = 100  # ArXiv API max per request
 

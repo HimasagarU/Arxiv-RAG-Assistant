@@ -15,7 +15,7 @@ env/
 
 # Project Specific
 Implementation_guide.md
-data/
+Metrics_Guide.md
 logs/
 .idea/
 .vscode/
