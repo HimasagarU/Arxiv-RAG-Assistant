@@ -16,6 +16,7 @@ env/
 # Project Specific
 Implementation_guide.md
 Metrics_Guide.md
+data/
 logs/
 .idea/
 .vscode/
@@ -23,3 +24,5 @@ logs/
 # Ignore sensitive files
 *.key
 *.pem
+
+arxiv_rag_data_20k.zip

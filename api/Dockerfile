@@ -11,12 +11,12 @@ COPY api/ api/
 COPY rerank/ rerank/
 COPY index/params.yaml index/params.yaml
 
-# Copy frontend UI
-COPY frontend/ frontend/
+# Create data directory
+RUN mkdir -p /app/data
 
-# Copy pre-computed index data (since it is small ~80MB, we can bake it into the image)
-COPY data/ data/
+# Make entrypoint executable
+RUN chmod +x api/entrypoint.sh
 
 EXPOSE 8000
 
-CMD ["uvicorn", "api.app:app", "--host", "0.0.0.0", "--port", "8000"]
+ENTRYPOINT ["/app/api/entrypoint.sh"]
