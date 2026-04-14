@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY api/ api/
 COPY rerank/ rerank/
+COPY frontend/ frontend/
 COPY index/params.yaml index/params.yaml
 
 # Create data directory
