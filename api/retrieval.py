@@ -15,7 +15,6 @@ Enhanced with:
 - Context compression via MMR
 """
 
-import json
 import logging
 import math
 import os
@@ -123,26 +122,6 @@ class HybridRetriever:
             bm25_data = pickle.load(f)
         self.bm25: BM25Okapi = bm25_data["bm25"]
         self.bm25_chunk_ids: list[str] = bm25_data["chunk_ids"]
-
-        # Build a lookup: chunk_id -> index for fast BM25 post-filtering
-        self.bm25_id_to_idx = {cid: i for i, cid in enumerate(self.bm25_chunk_ids)}
-
-        # Load chunk metadata from JSONL for BM25 post-filtering
-        chunks_path = os.getenv("CHUNKS_PATH", "data/chunks.jsonl")
-        self.chunk_metadata = {}
-        if os.path.exists(chunks_path):
-            with open(chunks_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        chunk = json.loads(line)
-                        self.chunk_metadata[chunk["chunk_id"]] = {
-                            "paper_id": chunk.get("paper_id", ""),
-                            "title": chunk.get("title", ""),
-                            "authors": chunk.get("authors", ""),
-                            "categories": chunk.get("categories", ""),
-                            "chunk_text": chunk.get("chunk_text", ""),
-                        }
 
         # Load reranker (FlashRank ONNX-based)
         self.reranker = Reranker()
@@ -280,9 +259,49 @@ class HybridRetriever:
             })
         return candidates
 
+    def _fetch_chunk_records(
+        self,
+        chunk_ids: list[str],
+        include_documents: bool = False,
+        include_metadatas: bool = True,
+    ) -> dict[str, dict]:
+        """Batch-fetch chunk records from Chroma and return an ID-indexed map."""
+        if not chunk_ids:
+            return {}
+
+        unique_ids = list(dict.fromkeys(chunk_ids))
+        include = []
+        if include_documents:
+            include.append("documents")
+        if include_metadatas:
+            include.append("metadatas")
+        if not include:
+            return {}
+
+        try:
+            fetched = self.collection.get(ids=unique_ids, include=include)
+        except Exception as e:
+            log.warning(f"Failed to fetch chunk records from Chroma: {e}")
+            return {}
+
+        fetched_ids = fetched.get("ids", []) or []
+        documents = fetched.get("documents", []) if include_documents else []
+        metadatas = fetched.get("metadatas", []) if include_metadatas else []
+
+        records = {}
+        for i, cid in enumerate(fetched_ids):
+            record = {}
+            if include_documents:
+                record["document"] = documents[i] if i < len(documents) and documents[i] else ""
+            if include_metadatas:
+                record["metadata"] = metadatas[i] if i < len(metadatas) and metadatas[i] else {}
+            records[cid] = record
+
+        return records
+
     def _bm25_retrieve(self, query: str, category: Optional[str] = None,
                        author: Optional[str] = None) -> list[dict]:
-        """Lexical retrieval via BM25 with optional post-filtering."""
+        """Lexical retrieval via BM25 with optional Chroma metadata post-filtering."""
         tokens = tokenize_bm25(query)
         if not tokens:
             return []
@@ -290,23 +309,51 @@ class HybridRetriever:
         scores = self.bm25.get_scores(tokens)
         top_indices = np.argsort(scores)[::-1][:self.k_lex * 2]  # Fetch extra for filtering
 
+        ranked_chunk_ids = [
+            self.bm25_chunk_ids[idx]
+            for idx in top_indices
+            if scores[idx] > 0
+        ]
+        if not ranked_chunk_ids:
+            return []
+
+        needs_filtering = bool(category or author)
+        metadata_by_id = {}
+        if needs_filtering:
+            records = self._fetch_chunk_records(
+                ranked_chunk_ids,
+                include_documents=False,
+                include_metadatas=True,
+            )
+            metadata_by_id = {cid: rec.get("metadata", {}) for cid, rec in records.items()}
+
+        normalized_category = category.strip().lower() if category else None
+        normalized_author = author.strip().lower() if author else None
+
         candidates = []
         for idx in top_indices:
-            if scores[idx] > 0 and len(candidates) < self.k_lex:
-                chunk_id = self.bm25_chunk_ids[idx]
-                meta = self.chunk_metadata.get(chunk_id, {})
+            if scores[idx] <= 0 or len(candidates) >= self.k_lex:
+                continue
 
-                # Post-filter by category/author
-                if category and category.strip().lower() not in meta.get("categories", "").lower():
-                    continue
-                if author and author.strip().lower() not in meta.get("authors", "").lower():
-                    continue
+            chunk_id = self.bm25_chunk_ids[idx]
+            meta = metadata_by_id.get(chunk_id, {}) if needs_filtering else {}
 
-                candidates.append({
-                    "chunk_id": chunk_id,
-                    "bm25_score": float(scores[idx]),
-                    "source": "bm25",
-                })
+            # Post-filter by category/author
+            if normalized_category and normalized_category not in meta.get("categories", "").lower():
+                continue
+            if normalized_author and normalized_author not in meta.get("authors", "").lower():
+                continue
+
+            candidate = {
+                "chunk_id": chunk_id,
+                "bm25_score": float(scores[idx]),
+                "source": "bm25",
+            }
+            if meta:
+                candidate["metadata"] = meta
+
+            candidates.append(candidate)
+
         return candidates
 
     def _merge_and_normalize(
@@ -327,36 +374,50 @@ class HybridRetriever:
 
         for c in bm25_candidates:
             cid = c["chunk_id"]
+            bm25_meta = c.get("metadata", {})
             if cid in merged:
                 merged[cid]["bm25_score_raw"] = c["bm25_score"]
-                merged[cid]["sources"].append("bm25")
+                if "bm25" not in merged[cid]["sources"]:
+                    merged[cid]["sources"].append("bm25")
+                if not merged[cid]["metadata"] and bm25_meta:
+                    merged[cid]["metadata"] = bm25_meta
             else:
                 merged[cid] = {
                     "chunk_id": cid,
                     "chunk_text": "",
-                    "metadata": {},
+                    "metadata": bm25_meta,
                     "dense_score_raw": 0.0,
                     "bm25_score_raw": c["bm25_score"],
                     "sources": ["bm25"],
                 }
 
+        if not merged:
+            return []
+
         candidates = list(merged.values())
 
-        # Fetch missing chunk texts from Chroma
-        missing_ids = [c["chunk_id"] for c in candidates if not c["chunk_text"]]
-        if missing_ids:
-            try:
-                fetched = self.collection.get(
-                    ids=missing_ids, include=["documents", "metadatas"]
-                )
-                for i, cid in enumerate(fetched["ids"]):
-                    for c in candidates:
-                        if c["chunk_id"] == cid:
-                            c["chunk_text"] = fetched["documents"][i]
-                            c["metadata"] = fetched["metadatas"][i]
-                            break
-            except Exception as e:
-                log.warning(f"Failed to fetch missing chunks: {e}")
+        # Fetch only the fields that are still missing after merge.
+        missing_doc_ids = [cid for cid, c in merged.items() if not c["chunk_text"]]
+        missing_meta_ids = [cid for cid, c in merged.items() if not c["metadata"]]
+        ids_to_fetch = list(dict.fromkeys(missing_doc_ids + missing_meta_ids))
+
+        if ids_to_fetch:
+            records = self._fetch_chunk_records(
+                ids_to_fetch,
+                include_documents=bool(missing_doc_ids),
+                include_metadatas=bool(missing_meta_ids),
+            )
+
+            for cid, record in records.items():
+                candidate = merged.get(cid)
+                if not candidate:
+                    continue
+                if not candidate["chunk_text"]:
+                    candidate["chunk_text"] = record.get("document", "")
+                if not candidate["metadata"]:
+                    candidate["metadata"] = record.get("metadata", {})
+
+        candidates = list(merged.values())
 
         # Normalize scores (min-max per source)
         dense_scores = [c["dense_score_raw"] for c in candidates if c["dense_score_raw"] > 0]

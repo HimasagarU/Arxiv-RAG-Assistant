@@ -114,6 +114,12 @@ class TestIngestion:
 class TestIntegration:
     """Integration tests (require built indexes)."""
 
+    def test_retriever_does_not_preload_chunk_metadata(self):
+        from api.retrieval import HybridRetriever
+
+        retriever = HybridRetriever()
+        assert not hasattr(retriever, "chunk_metadata")
+
     def test_retrieval_pipeline(self):
         from api.retrieval import HybridRetriever
         retriever = HybridRetriever()
@@ -121,6 +127,51 @@ class TestIntegration:
         assert "passages" in result
         assert "trace" in result
         assert len(result["passages"]) <= 3
+
+    def test_bm25_filtering_uses_chroma_metadata(self):
+        from api.retrieval import HybridRetriever
+
+        retriever = HybridRetriever()
+        query = "learning"
+
+        base_candidates = retriever._bm25_retrieve(query)
+        if not base_candidates:
+            pytest.skip("No BM25 candidates available for metadata filter test.")
+
+        sample_id = base_candidates[0]["chunk_id"]
+        fetched = retriever.collection.get(ids=[sample_id], include=["metadatas"])
+        sample_metadatas = fetched.get("metadatas", [])
+        if not sample_metadatas or not sample_metadatas[0]:
+            pytest.skip("Sample candidate has no metadata in Chroma.")
+
+        sample_meta = sample_metadatas[0]
+        sample_category = next(
+            (cat.strip() for cat in sample_meta.get("categories", "").split(",") if cat.strip()),
+            None,
+        )
+        sample_author = next(
+            (name.strip() for name in sample_meta.get("authors", "").split(",") if name.strip()),
+            None,
+        )
+
+        if sample_category:
+            category_candidates = retriever._bm25_retrieve(query, category=sample_category)
+            assert sample_id in {c["chunk_id"] for c in category_candidates}
+            assert all(
+                sample_category.lower() in c.get("metadata", {}).get("categories", "").lower()
+                for c in category_candidates
+            )
+
+        if sample_author:
+            author_candidates = retriever._bm25_retrieve(query, author=sample_author)
+            assert sample_id in {c["chunk_id"] for c in author_candidates}
+            assert all(
+                sample_author.lower() in c.get("metadata", {}).get("authors", "").lower()
+                for c in author_candidates
+            )
+
+        if not sample_category and not sample_author:
+            pytest.skip("Sample candidate metadata has no author/category values.")
 
     def test_api_health(self):
         from fastapi.testclient import TestClient
