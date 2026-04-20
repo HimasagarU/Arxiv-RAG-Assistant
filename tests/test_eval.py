@@ -128,9 +128,23 @@ class TestIntegration:
         assert "trace" in result
         assert len(result["passages"]) <= 3
 
-    def test_bm25_filtering_uses_chroma_metadata(self):
+    def test_dense_only_mode_when_bm25_disabled(self, monkeypatch):
         from api.retrieval import HybridRetriever
 
+        monkeypatch.setenv("ENABLE_BM25", "false")
+        retriever = HybridRetriever()
+        result = retriever.retrieve("transformer attention mechanism", top_n=3)
+
+        assert retriever.enable_bm25 is False
+        assert result["trace"].get("bm25_enabled") is False
+        assert result["trace"].get("bm25_ids") == []
+        assert "passages" in result
+        assert len(result["passages"]) <= 3
+
+    def test_bm25_filtering_uses_chroma_metadata(self, monkeypatch):
+        from api.retrieval import HybridRetriever
+
+        monkeypatch.setenv("ENABLE_BM25", "true")
         retriever = HybridRetriever()
         query = "learning"
 

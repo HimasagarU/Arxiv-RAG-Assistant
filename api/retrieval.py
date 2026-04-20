@@ -134,11 +134,12 @@ class HybridRetriever:
         bm25_path = bm25_path or os.getenv("BM25_INDEX_PATH", "data/bm25_index.pkl")
         embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
         reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "ms-marco-MiniLM-L-6-v2")
+        memory_limit_mb = _get_container_memory_limit_mb()
+
         reranker_env_override = os.getenv("ENABLE_RERANKER")
         if reranker_env_override is not None:
             self.enable_reranker = _env_flag("ENABLE_RERANKER", True)
         else:
-            memory_limit_mb = _get_container_memory_limit_mb()
             min_memory_for_reranker_mb = int(os.getenv("RERANKER_MIN_MEMORY_MB", "768"))
             self.enable_reranker = not (
                 memory_limit_mb is not None and memory_limit_mb <= min_memory_for_reranker_mb
@@ -147,6 +148,20 @@ class HybridRetriever:
                 log.info(
                     f"Disabling reranker due to low memory limit ({memory_limit_mb}MB <= {min_memory_for_reranker_mb}MB)."
                 )
+
+        bm25_env_override = os.getenv("ENABLE_BM25")
+        if bm25_env_override is not None:
+            self.enable_bm25 = _env_flag("ENABLE_BM25", True)
+        else:
+            min_memory_for_bm25_mb = int(os.getenv("BM25_MIN_MEMORY_MB", "640"))
+            self.enable_bm25 = not (
+                memory_limit_mb is not None and memory_limit_mb <= min_memory_for_bm25_mb
+            )
+            if not self.enable_bm25:
+                log.info(
+                    f"Disabling BM25 due to low memory limit ({memory_limit_mb}MB <= {min_memory_for_bm25_mb}MB)."
+                )
+
         self.reranker_lazy_load = _env_flag("RERANKER_LAZY_LOAD", True)
         self.db_path = os.getenv("DB_PATH", "data/arxiv_papers.db")
 
@@ -162,12 +177,16 @@ class HybridRetriever:
         self.collection = self.chroma_client.get_collection("arxiv_chunks")
         log.info(f"Chroma collection has {self.collection.count()} documents")
 
-        # Load BM25
-        log.info(f"Loading BM25 index from: {bm25_path}")
-        with open(bm25_path, "rb") as f:
-            bm25_data = pickle.load(f)
-        self.bm25: BM25Okapi = bm25_data["bm25"]
-        self.bm25_chunk_ids: list[str] = bm25_data["chunk_ids"]
+        self.bm25: Optional[BM25Okapi] = None
+        self.bm25_chunk_ids: list[str] = []
+        if self.enable_bm25:
+            log.info(f"Loading BM25 index from: {bm25_path}")
+            with open(bm25_path, "rb") as f:
+                bm25_data = pickle.load(f)
+            self.bm25 = bm25_data["bm25"]
+            self.bm25_chunk_ids = bm25_data["chunk_ids"]
+        else:
+            log.info("BM25 retrieval disabled by configuration.")
 
         # Configure reranker (FlashRank ONNX-based).
         self.reranker = Reranker(
@@ -352,6 +371,9 @@ class HybridRetriever:
     def _bm25_retrieve(self, query: str, category: Optional[str] = None,
                        author: Optional[str] = None) -> list[dict]:
         """Lexical retrieval via BM25 with optional Chroma metadata post-filtering."""
+        if not self.enable_bm25 or self.bm25 is None or not self.bm25_chunk_ids:
+            return []
+
         tokens = tokenize_bm25(query)
         if not tokens:
             return []
@@ -637,6 +659,7 @@ class HybridRetriever:
         bm25_candidates = self._bm25_retrieve(query, category=category, author=author)
         trace["bm25_ms"] = round((time.time() - t2) * 1000, 1)
         trace["bm25_ids"] = [c["chunk_id"] for c in bm25_candidates[:10]]
+        trace["bm25_enabled"] = self.enable_bm25
 
         # Step 3: Merge and normalize
         t3 = time.time()
