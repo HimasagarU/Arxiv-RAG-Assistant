@@ -1,15 +1,14 @@
 """
 reranker.py — Cross-encoder reranking for candidate passages.
 
-Loads a cross-encoder model (default: ms-marco-MiniLM-L-6-v2) on GPU
-and provides a rerank function for (query, passage) pairs.
+Uses FlashRank (ONNX-based, no PyTorch needed) for ultra-lightweight
+cross-encoder reranking. Default model: ms-marco-MiniLM-L-12-v2 (~30MB).
 """
 
 import logging
 from typing import Optional
 
-import torch
-from sentence_transformers import CrossEncoder
+from flashrank import Ranker, RerankRequest
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,15 +19,15 @@ log = logging.getLogger(__name__)
 
 
 class Reranker:
-    """Cross-encoder reranker for passage re-scoring."""
+    """Cross-encoder reranker using FlashRank (ONNX, no PyTorch)."""
 
-    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    def __init__(self, model_name: str = "ms-marco-MiniLM-L-12-v2",
                  device: Optional[str] = None, batch_size: int = 32):
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.batch_size = batch_size
-        log.info(f"Loading reranker model: {model_name} on {self.device}")
-        self.model = CrossEncoder(model_name, device=self.device)
-        log.info("Reranker model loaded.")
+        log.info(f"Loading FlashRank reranker model: {model_name}")
+        # FlashRank auto-downloads the ONNX model on first use (~30MB)
+        self.ranker = Ranker(model_name=model_name, cache_dir="/tmp/flashrank_cache")
+        log.info("FlashRank reranker model loaded.")
 
     def rerank(
         self,
@@ -38,7 +37,7 @@ class Reranker:
         text_key: str = "chunk_text",
     ) -> list[dict]:
         """
-        Rerank passages by cross-encoder score.
+        Rerank passages by cross-encoder score via FlashRank.
 
         Args:
             query: Search query string.
@@ -52,16 +51,21 @@ class Reranker:
         if not passages:
             return []
 
-        # Build (query, passage) pairs
-        pairs = [(query, p[text_key]) for p in passages]
-
-        # Score all pairs
-        scores = self.model.predict(pairs, batch_size=self.batch_size,
-                                    show_progress_bar=False)
-
-        # Attach scores and sort
+        # FlashRank expects passages as list of dicts with "id" and "text" keys
+        flashrank_passages = []
         for i, p in enumerate(passages):
-            p["rerank_score"] = float(scores[i])
+            flashrank_passages.append({
+                "id": i,
+                "text": p.get(text_key, ""),
+            })
+
+        rerank_request = RerankRequest(query=query, passages=flashrank_passages)
+        results = self.ranker.rerank(rerank_request)
+
+        # Map scores back to original passages
+        score_map = {r["id"]: r["score"] for r in results}
+        for i, p in enumerate(passages):
+            p["rerank_score"] = float(score_map.get(i, 0.0))
 
         reranked = sorted(passages, key=lambda x: x["rerank_score"], reverse=True)
         return reranked[:top_n]

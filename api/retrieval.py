@@ -27,9 +27,8 @@ from datetime import datetime
 from typing import Optional
 
 import numpy as np
-import torch
 from dotenv import load_dotenv
-from sentence_transformers import SentenceTransformer
+from fastembed import TextEmbedding
 
 import chromadb
 from rank_bm25 import BM25Okapi
@@ -106,12 +105,11 @@ class HybridRetriever:
         reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
         self.db_path = os.getenv("DB_PATH", "data/arxiv_papers.db")
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        log.info(f"Initializing HybridRetriever on device={device}")
+        log.info(f"Initializing HybridRetriever (ONNX mode, no PyTorch)")
 
-        # Load embedding model
+        # Load embedding model via fastembed (ONNX-based, lightweight)
         log.info(f"Loading embedding model: {embedding_model}")
-        self.embed_model = SentenceTransformer(embedding_model, device=device)
+        self.embed_model = TextEmbedding(model_name=f"sentence-transformers/{embedding_model}")
 
         # Load Chroma
         log.info(f"Loading Chroma collection from: {chroma_dir}")
@@ -146,8 +144,8 @@ class HybridRetriever:
                             "chunk_text": chunk.get("chunk_text", ""),
                         }
 
-        # Load reranker
-        self.reranker = Reranker(model_name=reranker_model, device=device)
+        # Load reranker (FlashRank ONNX-based)
+        self.reranker = Reranker()
 
         log.info("HybridRetriever ready.")
 
@@ -254,9 +252,7 @@ class HybridRetriever:
 
     def _dense_retrieve(self, query: str, where_filter: Optional[dict] = None) -> list[dict]:
         """Dense retrieval via Chroma with optional metadata filtering."""
-        query_embedding = self.embed_model.encode(
-            query, convert_to_numpy=True, normalize_embeddings=True
-        ).tolist()
+        query_embedding = list(self.embed_model.embed([query]))[0].tolist()
 
         query_params = {
             "query_embeddings": [query_embedding],
@@ -453,8 +449,8 @@ class HybridRetriever:
                 return " ".join(all_sentences)
             
             # Encode query and sentences
-            query_emb = self.embed_model.encode(query, convert_to_numpy=True, normalize_embeddings=True)
-            sent_embs = self.embed_model.encode(all_sentences, convert_to_numpy=True, normalize_embeddings=True)
+            query_emb = list(self.embed_model.embed([query]))[0]
+            sent_embs = np.array(list(self.embed_model.embed(all_sentences)))
             
             # MMR selection
             selected_indices = []
