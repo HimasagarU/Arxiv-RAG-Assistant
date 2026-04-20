@@ -70,6 +70,38 @@ def tokenize_bm25(text: str) -> list[str]:
     return [t for t in tokens if t not in STOPWORDS]
 
 
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse boolean-like environment flags with a safe default."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _get_container_memory_limit_mb() -> Optional[int]:
+    """Best-effort container memory limit detection from cgroup files."""
+    cgroup_paths = [
+        "/sys/fs/cgroup/memory.max",  # cgroup v2
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",  # cgroup v1
+    ]
+    for path in cgroup_paths:
+        try:
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8") as f:
+                raw = f.read().strip()
+            if not raw or raw == "max":
+                continue
+            limit_bytes = int(raw)
+            # Ignore unrealistic huge values often used as "no limit" sentinels.
+            if limit_bytes <= 0 or limit_bytes > (1 << 60):
+                continue
+            return int(limit_bytes / (1024 * 1024))
+        except Exception:
+            continue
+    return None
+
+
 class HybridRetriever:
     """
     Hybrid retrieval: dense (Chroma) + lexical (BM25) + cross-encoder reranking.
@@ -101,7 +133,21 @@ class HybridRetriever:
         chroma_dir = chroma_dir or os.getenv("CHROMA_DIR", "data/chroma_db")
         bm25_path = bm25_path or os.getenv("BM25_INDEX_PATH", "data/bm25_index.pkl")
         embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-        reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "ms-marco-MiniLM-L-6-v2")
+        reranker_env_override = os.getenv("ENABLE_RERANKER")
+        if reranker_env_override is not None:
+            self.enable_reranker = _env_flag("ENABLE_RERANKER", True)
+        else:
+            memory_limit_mb = _get_container_memory_limit_mb()
+            min_memory_for_reranker_mb = int(os.getenv("RERANKER_MIN_MEMORY_MB", "768"))
+            self.enable_reranker = not (
+                memory_limit_mb is not None and memory_limit_mb <= min_memory_for_reranker_mb
+            )
+            if not self.enable_reranker:
+                log.info(
+                    f"Disabling reranker due to low memory limit ({memory_limit_mb}MB <= {min_memory_for_reranker_mb}MB)."
+                )
+        self.reranker_lazy_load = _env_flag("RERANKER_LAZY_LOAD", True)
         self.db_path = os.getenv("DB_PATH", "data/arxiv_papers.db")
 
         log.info(f"Initializing HybridRetriever (ONNX mode, no PyTorch)")
@@ -123,8 +169,12 @@ class HybridRetriever:
         self.bm25: BM25Okapi = bm25_data["bm25"]
         self.bm25_chunk_ids: list[str] = bm25_data["chunk_ids"]
 
-        # Load reranker (FlashRank ONNX-based)
-        self.reranker = Reranker()
+        # Configure reranker (FlashRank ONNX-based).
+        self.reranker = Reranker(
+            model_name=reranker_model,
+            lazy_load=self.reranker_lazy_load,
+            enabled=self.enable_reranker,
+        )
 
         log.info("HybridRetriever ready.")
 
@@ -605,7 +655,13 @@ class HybridRetriever:
 
         # Step 4: Cross-encoder reranking
         t4 = time.time()
-        reranked = self.reranker.rerank(query, merged, top_n=top_n)
+        try:
+            reranked = self.reranker.rerank(query, merged, top_n=top_n)
+            trace["rerank_fallback"] = False
+        except Exception as e:
+            log.warning(f"Reranking failed; using fusion ranking fallback: {e}")
+            reranked = merged[:top_n]
+            trace["rerank_fallback"] = True
         trace["rerank_ms"] = round((time.time() - t4) * 1000, 1)
         trace["reranked_ids"] = [c["chunk_id"] for c in reranked]
 
