@@ -5,12 +5,12 @@ echo  ArXiv RAG — Ingestion Pipeline
 echo ============================================
 
 echo.
-echo [1/2] Fetching papers from ArXiv API...
-conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 10000
+echo [1/2] Fetching papers from ArXiv API + extracting full text from PDFs...
+conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 10000 --include-full-text --max-fulltext-papers 0
 
 echo.
-echo [2/2] Chunking papers...
-conda run -n pytorch python ingest/chunking.py
+echo [2/2] Chunking papers (source=auto, prefer full_text)...
+conda run -n pytorch python ingest/chunking.py --source auto
 
 echo.
 echo Done! Check data/ for arxiv_papers.db and chunks.jsonl

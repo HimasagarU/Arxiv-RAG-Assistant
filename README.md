@@ -10,6 +10,7 @@ A hybrid Retrieval-Augmented Generation (RAG) system for ArXiv research papers. 
 *   **Similar Papers**: Discover related papers via embedding-based nearest-neighbor search.
 *   **Recency Boosting**: Time-decay weighting gives newer research a slight advantage.
 *   **Context Compression**: MMR-based sentence selection reduces LLM token usage.
+*   **Optional Full-Text Chunking**: Can enrich papers with PDF body text and chunk `full_text` instead of abstract-only mode.
 *   **In-Memory Caching**: LRU query cache with 5-minute TTL for instant repeated queries.
 *   **Analytics Extraction**: Top authors and categories surfaced per query.
 *   **ONNX-First Inference**: FastEmbed + FlashRank avoid heavy PyTorch model loading at runtime.
@@ -42,6 +43,16 @@ pip install -r requirements.txt
 # Fetch 20000 papers (cs.AI, cs.LG) & chunk them
 python ingest/ingest_arxiv.py --max-papers 20000
 python ingest/chunking.py
+```
+
+Optional full-text mode (slower, larger index, better long-answer recall):
+
+```bash
+# Enrich with PDF body text for up to 500 papers by default
+python ingest/ingest_arxiv.py --max-papers 20000 --include-full-text
+
+# Chunk using full text when available, fallback to abstract
+python ingest/chunking.py --source auto
 ```
 
 ### 3. Build Indexes
@@ -79,6 +90,15 @@ ENABLE_BM25=true
 ENABLE_RERANKER=true
 RERANKER_LAZY_LOAD=true
 RERANKER_MODEL=ms-marco-MiniLM-L-6-v2
+```
+
+Local machine full-feature workflow (BM25 + reranker + full_text chunks):
+
+```bash
+python ingest/ingest_arxiv.py --max-papers 20000 --include-full-text --max-fulltext-papers 0
+python ingest/chunking.py --source auto
+python index/build_chroma.py
+python index/build_bm25.py
 ```
 
 **Low-memory mode (512MB class instances):**
@@ -123,7 +143,7 @@ When BM25 is disabled, retrieval runs in dense-only mode and still supports meta
 | **SQLite DB** | 38.93 MiB | Document metadata |
 | **Embeddings Backup** | 36.61 MiB | NumPy `.npy` file |
 | **Total Papers Indexed** | 20,000 | From cs.AI and cs.LG |
-| **Total Chunks** | 24,992 | Chunk size 300, overlap 20% (avg tokens: 220.47, median: 240) |
+| **Total Chunks** | 24,992 | Chunk size 300, overlap 20% in `abstract` source mode (avg tokens: 220.47, median: 240) |
 
 **Cache Config:** In-memory LRU cache with `max_size=128` and `ttl_seconds=300` (5 minutes).
 

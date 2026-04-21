@@ -1,8 +1,9 @@
 """
-chunking.py — Chunk paper abstracts into overlapping segments for indexing.
+chunking.py — Chunk paper text into overlapping segments for indexing.
 
 Usage:
-    conda run -n pytorch python ingest/chunking.py [--db-path data/arxiv_papers.db] [--output data/chunks.jsonl]
+    conda run -n pytorch python ingest/chunking.py [--db-path data/arxiv_papers.db]
+        [--output data/chunks.jsonl] [--source abstract|full_text|auto]
 """
 
 import argparse
@@ -26,6 +27,7 @@ DEFAULT_DB_PATH = os.getenv("DB_PATH", "data/arxiv_papers.db")
 DEFAULT_OUTPUT = os.getenv("CHUNKS_PATH", "data/chunks.jsonl")
 DEFAULT_CHUNK_SIZE = 300  # tokens
 DEFAULT_OVERLAP_FRAC = 0.2
+DEFAULT_SOURCE_MODE = os.getenv("CHUNK_SOURCE_MODE", "abstract")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,18 +81,57 @@ def chunk_text(
     return chunks
 
 
+def build_chunk_source_text(paper: dict, source_mode: str = "abstract") -> str:
+    """Build text that will be chunked from selected source mode."""
+    title = (paper.get("title") or "").strip()
+    abstract = (paper.get("abstract") or "").strip()
+    full_text = (paper.get("full_text") or "").strip()
+
+    if source_mode == "abstract":
+        body = abstract
+    elif source_mode == "full_text":
+        body = full_text
+    elif source_mode == "auto":
+        body = full_text or abstract
+    else:
+        raise ValueError(f"Unsupported source_mode: {source_mode}")
+
+    if not body:
+        return ""
+    return f"{title}. {body}" if title else body
+
+
+def resolve_chunk_source(paper: dict, source_mode: str) -> str:
+    """Resolve actual source used for a chunk when mode can fallback."""
+    if source_mode != "auto":
+        return source_mode
+    return "full_text" if (paper.get("full_text") or "").strip() else "abstract"
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    """Check whether a SQLite table has a given column name."""
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return column in cols
+
+
 def process_papers(
     db_path: str,
     output_path: str,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap_frac: float = DEFAULT_OVERLAP_FRAC,
+    source_mode: str = DEFAULT_SOURCE_MODE,
 ):
-    """Read papers from SQLite, chunk abstracts, write JSONL."""
+    """Read papers from SQLite, chunk selected source text, write JSONL."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
 
+    has_full_text = _has_column(conn, "papers", "full_text")
+    select_fields = "paper_id, title, abstract, authors, categories"
+    if has_full_text:
+        select_fields += ", full_text"
+
     papers = conn.execute(
-        "SELECT paper_id, title, abstract, authors, categories FROM papers"
+        f"SELECT {select_fields} FROM papers"
     ).fetchall()
     conn.close()
 
@@ -102,12 +143,18 @@ def process_papers(
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
     total_chunks = 0
+    skipped_no_source = 0
 
     with open(output_path, "w", encoding="utf-8") as f:
-        for paper in tqdm(papers, desc="Chunking papers", unit="paper"):
-            # Combine title + abstract for richer chunks
-            full_text = f"{paper['title']}. {paper['abstract']}"
-            chunks = chunk_text(full_text, tokenizer, chunk_size, overlap_frac)
+        for row in tqdm(papers, desc="Chunking papers", unit="paper"):
+            paper = dict(row)
+            source_text = build_chunk_source_text(paper, source_mode=source_mode)
+            if not source_text:
+                skipped_no_source += 1
+                continue
+
+            chunks = chunk_text(source_text, tokenizer, chunk_size, overlap_frac)
+            chunk_source = resolve_chunk_source(paper, source_mode)
 
             for i, chunk in enumerate(chunks):
                 chunk_record = {
@@ -120,11 +167,15 @@ def process_papers(
                     "token_count": chunk["token_count"],
                     "chunk_index": i,
                     "total_chunks": len(chunks),
+                    "chunk_source": chunk_source,
                 }
                 f.write(json.dumps(chunk_record) + "\n")
                 total_chunks += 1
 
-    log.info(f"Created {total_chunks} chunks from {len(papers)} papers → {output_path}")
+    log.info(
+        f"Created {total_chunks} chunks from {len(papers)} papers "
+        f"(source_mode={source_mode}, skipped_without_source={skipped_no_source}) → {output_path}"
+    )
     return total_chunks
 
 
@@ -133,7 +184,7 @@ def process_papers(
 # ---------------------------------------------------------------------------
 
 def main():
-    parser = argparse.ArgumentParser(description="Chunk paper abstracts for indexing")
+    parser = argparse.ArgumentParser(description="Chunk paper text for indexing")
     parser.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH,
                         help="SQLite database path")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT,
@@ -142,9 +193,18 @@ def main():
                         help="Chunk size in tokens (default: 300)")
     parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP_FRAC,
                         help="Overlap fraction (default: 0.2)")
+    parser.add_argument("--source", type=str, default=DEFAULT_SOURCE_MODE,
+                        choices=["abstract", "full_text", "auto"],
+                        help="Source text mode: abstract, full_text, or auto (prefer full_text)")
     args = parser.parse_args()
 
-    total = process_papers(args.db_path, args.output, args.chunk_size, args.overlap)
+    total = process_papers(
+        args.db_path,
+        args.output,
+        args.chunk_size,
+        args.overlap,
+        source_mode=args.source,
+    )
     if total == 0:
         log.error("No chunks created. Check database content.")
     else:

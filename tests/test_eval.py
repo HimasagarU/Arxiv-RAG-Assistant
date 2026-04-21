@@ -85,6 +85,39 @@ class TestChunking:
         for c in chunks:
             assert c["token_count"] <= 100
 
+    def test_build_chunk_source_text_abstract_mode(self):
+        from ingest.chunking import build_chunk_source_text
+
+        paper = {
+            "title": "Test Title",
+            "abstract": "Abstract body",
+            "full_text": "Full paper body",
+        }
+        text = build_chunk_source_text(paper, source_mode="abstract")
+        assert text == "Test Title. Abstract body"
+
+    def test_build_chunk_source_text_auto_prefers_full_text(self):
+        from ingest.chunking import build_chunk_source_text
+
+        paper = {
+            "title": "Test Title",
+            "abstract": "Abstract body",
+            "full_text": "Full paper body",
+        }
+        text = build_chunk_source_text(paper, source_mode="auto")
+        assert text == "Test Title. Full paper body"
+
+    def test_build_chunk_source_text_full_text_mode_missing(self):
+        from ingest.chunking import build_chunk_source_text
+
+        paper = {
+            "title": "Test Title",
+            "abstract": "Abstract body",
+            "full_text": "",
+        }
+        text = build_chunk_source_text(paper, source_mode="full_text")
+        assert text == ""
+
 
 # ---------------------------------------------------------------------------
 # Unit tests for ArXiv ingestion helpers

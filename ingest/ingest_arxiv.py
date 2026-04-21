@@ -1,17 +1,19 @@
 """
-ingest_arxiv.py — Fetch papers from ArXiv API and store metadata in SQLite.
+ingest_arxiv.py -- Fetch papers from ArXiv API and store metadata in SQLite.
 
 Usage:
-    conda run -n pytorch python ingest/ingest_arxiv.py [--categories cs.AI,cs.LG] [--max-papers 5000]
+    conda run -n pytorch python ingest/ingest_arxiv.py \
+        [--categories cs.AI,cs.LG] [--max-papers 5000] [--include-full-text]
 """
 
 import argparse
+import io
+import logging
 import os
 import re
 import sqlite3
 import sys
 import time
-import logging
 from pathlib import Path
 
 import feedparser
@@ -29,6 +31,9 @@ ARXIV_API_URL = "http://export.arxiv.org/api/query"
 DEFAULT_CATEGORIES = os.getenv("ARXIV_CATEGORIES", "cs.AI,cs.LG")
 DEFAULT_MAX_PAPERS = int(os.getenv("MAX_PAPERS", "10000"))
 DEFAULT_DB_PATH = os.getenv("DB_PATH", "data/arxiv_papers.db")
+DEFAULT_PDF_TIMEOUT = int(os.getenv("PDF_TIMEOUT", "30"))
+DEFAULT_MAX_FULLTEXT_CHARS = int(os.getenv("MAX_FULLTEXT_CHARS", "150000"))
+DEFAULT_MAX_FULLTEXT_PAPERS = int(os.getenv("MAX_FULLTEXT_PAPERS", "500"))
 RESULTS_PER_PAGE = 100  # ArXiv API max per request
 
 logging.basicConfig(
@@ -43,12 +48,25 @@ log = logging.getLogger(__name__)
 # Database helpers
 # ---------------------------------------------------------------------------
 
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, column_type: str):
+    """Add a SQLite column if it does not already exist."""
+    cols = {
+        row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+        conn.commit()
+        log.info(f"Added missing column '{column}' to table '{table}'")
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     """Create SQLite database and papers table if not exists."""
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS papers (
             paper_id   TEXT PRIMARY KEY,
             title      TEXT NOT NULL,
@@ -57,18 +75,25 @@ def init_db(db_path: str) -> sqlite3.Connection:
             categories TEXT,
             pdf_url    TEXT,
             published  TEXT,
-            updated    TEXT
+            updated    TEXT,
+            full_text  TEXT
         )
-    """)
+        """
+    )
     conn.commit()
+
+    # Ensure backward compatibility with older DB files.
+    _ensure_column(conn, "papers", "full_text", "TEXT")
+
     return conn
 
 
 def upsert_paper(conn: sqlite3.Connection, paper: dict):
     """Insert or update a paper record (idempotent by paper_id)."""
-    conn.execute("""
-        INSERT INTO papers (paper_id, title, abstract, authors, categories, pdf_url, published, updated)
-        VALUES (:paper_id, :title, :abstract, :authors, :categories, :pdf_url, :published, :updated)
+    conn.execute(
+        """
+        INSERT INTO papers (paper_id, title, abstract, authors, categories, pdf_url, published, updated, full_text)
+        VALUES (:paper_id, :title, :abstract, :authors, :categories, :pdf_url, :published, :updated, :full_text)
         ON CONFLICT(paper_id) DO UPDATE SET
             title      = excluded.title,
             abstract   = excluded.abstract,
@@ -76,13 +101,17 @@ def upsert_paper(conn: sqlite3.Connection, paper: dict):
             categories = excluded.categories,
             pdf_url    = excluded.pdf_url,
             published  = excluded.published,
-            updated    = excluded.updated
-    """, paper)
+            updated    = excluded.updated,
+            full_text  = COALESCE(NULLIF(excluded.full_text, ''), papers.full_text)
+        """,
+        paper,
+    )
 
 
 # ---------------------------------------------------------------------------
 # ArXiv API helpers
 # ---------------------------------------------------------------------------
+
 
 def build_query(categories: list[str]) -> str:
     """Build ArXiv search query string from category list."""
@@ -131,7 +160,50 @@ def parse_entry(entry) -> dict:
         "pdf_url": pdf_url,
         "published": entry.get("published", ""),
         "updated": entry.get("updated", ""),
+        "full_text": None,
     }
+
+
+def fetch_pdf_text(
+    pdf_url: str,
+    timeout: int = DEFAULT_PDF_TIMEOUT,
+    max_chars: int = DEFAULT_MAX_FULLTEXT_CHARS,
+) -> str:
+    """Download and extract text from a PDF URL with a size cap for safety."""
+    try:
+        from pypdf import PdfReader
+    except Exception as e:
+        raise RuntimeError(
+            "pypdf is required for --include-full-text. Install dependencies from requirements.txt"
+        ) from e
+
+    try:
+        response = requests.get(pdf_url, timeout=timeout)
+        response.raise_for_status()
+        reader = PdfReader(io.BytesIO(response.content))
+    except Exception as e:
+        log.debug(f"Failed to download/parse PDF {pdf_url}: {e}")
+        return ""
+
+    parts = []
+    total_chars = 0
+
+    for page in reader.pages:
+        page_text = clean_text(page.extract_text() or "")
+        if not page_text:
+            continue
+
+        if total_chars >= max_chars:
+            break
+
+        remaining = max_chars - total_chars
+        if len(page_text) > remaining:
+            page_text = page_text[:remaining]
+
+        parts.append(page_text)
+        total_chars += len(page_text)
+
+    return clean_text(" ".join(parts))
 
 
 def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
@@ -152,10 +224,8 @@ def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
             "sortOrder": "descending",
         }
 
-        url = f"{ARXIV_API_URL}?search_query={query}&start={start}&max_results={batch_size}&sortBy=submittedDate&sortOrder=descending"
-
         try:
-            response = requests.get(url, timeout=30)
+            response = requests.get(ARXIV_API_URL, params=params, timeout=30)
             response.raise_for_status()
         except requests.RequestException as e:
             log.warning(f"Request failed at offset {start}: {e}. Retrying in 10s...")
@@ -189,14 +259,50 @@ def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="Ingest papers from ArXiv API into SQLite")
-    parser.add_argument("--categories", type=str, default=DEFAULT_CATEGORIES,
-                        help="Comma-separated ArXiv categories (default: cs.AI,cs.LG)")
-    parser.add_argument("--max-papers", type=int, default=DEFAULT_MAX_PAPERS,
-                        help="Maximum number of papers to fetch (default: 5000)")
-    parser.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH,
-                        help="SQLite database path (default: data/arxiv_papers.db)")
+    parser.add_argument(
+        "--categories",
+        type=str,
+        default=DEFAULT_CATEGORIES,
+        help="Comma-separated ArXiv categories (default: cs.AI,cs.LG)",
+    )
+    parser.add_argument(
+        "--max-papers",
+        type=int,
+        default=DEFAULT_MAX_PAPERS,
+        help="Maximum number of papers to fetch",
+    )
+    parser.add_argument(
+        "--db-path",
+        type=str,
+        default=DEFAULT_DB_PATH,
+        help="SQLite database path (default: data/arxiv_papers.db)",
+    )
+    parser.add_argument(
+        "--include-full-text",
+        action="store_true",
+        help="Fetch and extract full text from paper PDFs (slower, larger storage)",
+    )
+    parser.add_argument(
+        "--pdf-timeout",
+        type=int,
+        default=DEFAULT_PDF_TIMEOUT,
+        help="PDF download timeout in seconds",
+    )
+    parser.add_argument(
+        "--max-fulltext-chars",
+        type=int,
+        default=DEFAULT_MAX_FULLTEXT_CHARS,
+        help="Maximum characters to store per paper full text",
+    )
+    parser.add_argument(
+        "--max-fulltext-papers",
+        type=int,
+        default=DEFAULT_MAX_FULLTEXT_PAPERS,
+        help="Max papers to enrich with full text; 0 means all",
+    )
     args = parser.parse_args()
 
     categories = [c.strip() for c in args.categories.split(",")]
@@ -208,6 +314,30 @@ def main():
     if not papers:
         log.error("No papers fetched. Check network / ArXiv API.")
         sys.exit(1)
+
+    if args.include_full_text:
+        full_text_limit = (
+            len(papers)
+            if args.max_fulltext_papers == 0
+            else min(args.max_fulltext_papers, len(papers))
+        )
+        log.info(
+            f"Fetching full text from PDFs for up to {full_text_limit} papers "
+            f"(timeout={args.pdf_timeout}s, max_chars={args.max_fulltext_chars})"
+        )
+
+        enriched = 0
+        for paper in tqdm(papers[:full_text_limit], desc="Fetching full text", unit="paper"):
+            full_text = fetch_pdf_text(
+                paper["pdf_url"],
+                timeout=args.pdf_timeout,
+                max_chars=args.max_fulltext_chars,
+            )
+            if full_text:
+                paper["full_text"] = full_text
+                enriched += 1
+
+        log.info(f"Extracted full text for {enriched}/{full_text_limit} papers")
 
     # Store in SQLite
     conn = init_db(args.db_path)

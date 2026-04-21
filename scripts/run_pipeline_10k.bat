@@ -5,12 +5,12 @@ echo  ArXiv RAG — 10k Pipeline Automation
 echo ============================================
 
 echo.
-echo [1/4] Fetching 10,000 papers from ArXiv API (This will take ~10 minutes)...
-conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 10000
+echo [1/4] Fetching 10,000 papers + extracting full text from PDFs (this can take longer)...
+conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 10000 --include-full-text --max-fulltext-papers 0
 
 echo.
-echo [2/4] Chunking papers...
-conda run -n pytorch python ingest/chunking.py
+echo [2/4] Chunking papers (source=auto, prefer full_text)...
+conda run -n pytorch python ingest/chunking.py --source auto
 
 echo.
 echo [3/4] Building Vector and Lexical Indexes...
