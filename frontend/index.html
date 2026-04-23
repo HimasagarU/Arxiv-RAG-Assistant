@@ -68,7 +68,7 @@
         }
 
         .header-inner {
-            max-width: 860px;
+            max-width: 900px;
             margin: 0 auto;
             padding: 18px 24px;
             display: flex;
@@ -128,7 +128,7 @@
         /* ============================================ */
         .main {
             flex: 1;
-            max-width: 860px;
+            max-width: 900px;
             width: 100%;
             margin: 0 auto;
             padding: 36px 24px 48px;
@@ -379,13 +379,20 @@
             font-weight: 500;
         }
 
+        .latency-chip.streaming-chip {
+            background: rgba(79, 70, 229, 0.08);
+            border-color: rgba(79, 70, 229, 0.2);
+            color: #4f46e5;
+            font-weight: 500;
+        }
+
         /* Answer card */
         .answer-card {
             background: var(--bg-white);
             border: 1px solid var(--border);
             border-left: 4px solid var(--accent);
             border-radius: var(--radius);
-            padding: 24px 28px;
+            padding: 28px 32px;
             margin-bottom: 24px;
             box-shadow: var(--shadow-sm);
         }
@@ -395,17 +402,78 @@
             font-size: 14px;
             font-weight: 600;
             color: var(--accent);
-            margin-bottom: 14px;
+            margin-bottom: 16px;
             display: flex;
             align-items: center;
             gap: 8px;
         }
 
         .answer-text {
-            font-size: 15px;
-            line-height: 1.8;
+            font-size: 17px;
+            line-height: 1.95;
             color: var(--text-body);
             white-space: pre-wrap;
+        }
+
+        .answer-text strong, .answer-text b {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        /* Streaming cursor */
+        .answer-text.streaming::after {
+            content: '▊';
+            display: inline;
+            color: var(--accent);
+            animation: blink 0.7s step-end infinite;
+        }
+
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+
+        /* References footnotes */
+        .references-card {
+            background: var(--bg-warm);
+            border: 1px solid var(--border-light);
+            border-radius: var(--radius);
+            padding: 18px 22px;
+            margin-bottom: 24px;
+            display: none;
+        }
+
+        .references-card.visible { display: block; animation: fadeIn 0.3s ease; }
+
+        .references-label {
+            font-family: 'Source Serif 4', Georgia, serif;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 10px;
+        }
+
+        .references-list {
+            list-style: none;
+            font-size: 14px;
+            line-height: 1.7;
+            color: var(--text-secondary);
+        }
+
+        .references-list li {
+            padding: 3px 0;
+            display: flex;
+            gap: 8px;
+        }
+
+        .references-list .ref-num {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            color: var(--accent);
+            font-weight: 600;
+            flex-shrink: 0;
+            min-width: 24px;
         }
 
         /* Sources */
@@ -655,6 +723,7 @@
             .search-btn { width: 100%; justify-content: center; }
             .filters-row { gap: 8px; }
             .analytics-strip { flex-direction: column; }
+            .answer-text { font-size: 15px; line-height: 1.8; }
         }
     </style>
 </head>
@@ -773,6 +842,12 @@
                     <div class="answer-text" id="answerText"></div>
                 </div>
 
+                <!-- References (extracted from answer) -->
+                <div class="references-card" id="referencesCard">
+                    <div class="references-label">📚 References</div>
+                    <ul class="references-list" id="referencesList"></ul>
+                </div>
+
                 <!-- Sources -->
                 <div class="sources-header" id="sourcesCount">Sources</div>
                 <div id="sourcesList"></div>
@@ -792,6 +867,7 @@
         // Config
         // ============================================
         const API_BASE = window.location.origin;
+        let currentAbortController = null;
 
         // ============================================
         // DOM Refs
@@ -813,6 +889,8 @@
         const statusBadge = document.getElementById('statusBadge');
         const statusText = document.getElementById('statusText');
         const sampleQueries = document.getElementById('sampleQueries');
+        const referencesCard = document.getElementById('referencesCard');
+        const referencesList = document.getElementById('referencesList');
 
         // ============================================
         // Health Check
@@ -834,7 +912,7 @@
         checkHealth();
 
         // ============================================
-        // Submit Query
+        // Submit Query (uses streaming endpoint)
         // ============================================
         queryInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && !e.shiftKey) {
@@ -847,6 +925,12 @@
             const query = queryInput.value.trim();
             if (!query) return;
 
+            // Abort any previous stream
+            if (currentAbortController) {
+                currentAbortController.abort();
+            }
+            currentAbortController = new AbortController();
+
             const topK = parseInt(topKSelect.value);
             const category = filterCategory.value || null;
             const startYear = filterYear.value ? parseInt(filterYear.value) : null;
@@ -856,8 +940,15 @@
             searchBtn.disabled = true;
             errorCard.classList.remove('visible');
             resultsSection.classList.remove('visible');
+            referencesCard.classList.remove('visible');
             loadingOverlay.classList.add('visible');
             sampleQueries.style.display = 'none';
+            answerText.textContent = '';
+            answerText.classList.remove('streaming');
+            sourcesList.innerHTML = '';
+            referencesList.innerHTML = '';
+            latencyBar.innerHTML = '';
+            analyticsStrip.innerHTML = '';
 
             animateLoadingSteps();
 
@@ -867,27 +958,337 @@
                 if (startYear) body.start_year = startYear;
                 if (author) body.author = author;
 
-                const resp = await fetch(`${API_BASE}/query`, {
+                // Try streaming endpoint first
+                const resp = await fetch(`${API_BASE}/query/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(body),
+                    signal: currentAbortController.signal,
                 });
 
                 if (!resp.ok) {
-                    const errData = await resp.json().catch(() => ({}));
-                    throw new Error(errData.detail || `HTTP ${resp.status}`);
+                    // Fallback to non-streaming
+                    const fallbackResp = await fetch(`${API_BASE}/query`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(body),
+                    });
+                    if (!fallbackResp.ok) {
+                        const errData = await fallbackResp.json().catch(() => ({}));
+                        throw new Error(errData.detail || `HTTP ${fallbackResp.status}`);
+                    }
+                    const data = await fallbackResp.json();
+                    loadingOverlay.classList.remove('visible');
+                    renderResults(data);
+                    return;
                 }
 
-                const data = await resp.json();
-                renderResults(data);
+                // Process SSE stream
+                loadingOverlay.classList.remove('visible');
+                resultsSection.classList.add('visible');
+                answerText.classList.add('streaming');
+
+                const reader = resp.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                let fullAnswer = '';
+                let metadataReceived = false;
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // Process SSE events from buffer
+                    const lines = buffer.split('\n');
+                    buffer = lines.pop(); // keep incomplete line in buffer
+
+                    for (const line of lines) {
+                        if (!line.startsWith('data: ')) continue;
+                        const jsonStr = line.slice(6).trim();
+                        if (!jsonStr) continue;
+
+                        try {
+                            const event = JSON.parse(jsonStr);
+
+                            if (event.type === 'metadata') {
+                                metadataReceived = true;
+                                renderStreamMetadata(event);
+                            } else if (event.type === 'token') {
+                                fullAnswer += event.content;
+                                answerText.textContent = fullAnswer;
+                                // Auto-scroll answer into view
+                                answerText.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+                            } else if (event.type === 'error') {
+                                throw new Error(event.message);
+                            } else if (event.type === 'done') {
+                                answerText.classList.remove('streaming');
+                                // Update total latency
+                                updateTotalLatency(event.total_ms);
+                                // Parse and render references from the full answer
+                                processAnswerReferences(fullAnswer);
+                            }
+                        } catch (parseErr) {
+                            if (parseErr.message && !parseErr.message.includes('JSON')) {
+                                throw parseErr;
+                            }
+                        }
+                    }
+                }
+
+                // Ensure streaming cursor is removed
+                answerText.classList.remove('streaming');
+                if (fullAnswer) {
+                    processAnswerReferences(fullAnswer);
+                }
 
             } catch (err) {
+                if (err.name === 'AbortError') return;
+                loadingOverlay.classList.remove('visible');
+                answerText.classList.remove('streaming');
                 errorCard.textContent = `⚠ Error: ${err.message}. Make sure the API server is running.`;
                 errorCard.classList.add('visible');
             } finally {
-                loadingOverlay.classList.remove('visible');
                 searchBtn.disabled = false;
             }
+        }
+
+        // ============================================
+        // Process answer: extract References section
+        // ============================================
+        function processAnswerReferences(fullAnswer) {
+            // Find "References:" section at the end of the answer
+            const refRegex = /\n\s*References:\s*\n([\s\S]*?)$/i;
+            const match = fullAnswer.match(refRegex);
+
+            if (match) {
+                // Strip references from displayed answer
+                const cleanAnswer = fullAnswer.slice(0, match.index).trim();
+                renderFormattedAnswer(cleanAnswer);
+
+                // Parse individual references
+                const refLines = match[1].trim().split('\n').filter(l => l.trim());
+                if (refLines.length > 0) {
+                    referencesList.innerHTML = refLines.map(line => {
+                        const refMatch = line.match(/^\[(\d+)\]\s*(.+)/);
+                        if (refMatch) {
+                            const num = refMatch[1];
+                            const title = refMatch[2].replace(/^[""]|[""]$/g, '').trim();
+                            return `<li><span class="ref-num">[${escapeHtml(num)}]</span><span>${escapeHtml(title)}</span></li>`;
+                        }
+                        return `<li><span>${escapeHtml(line.trim())}</span></li>`;
+                    }).join('');
+                    referencesCard.classList.add('visible');
+                }
+            } else {
+                renderFormattedAnswer(fullAnswer.trim());
+            }
+        }
+
+        // ============================================
+        // Render formatted answer (basic markdown)
+        // ============================================
+        function renderFormattedAnswer(text) {
+            if (!text) return;
+
+            let html = escapeHtml(text);
+
+            // Bold: **text** (including multi-line)
+            html = html.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
+            
+            // Italic: _text_ or *text*
+            html = html.replace(/_([\s\S]+?)_/g, '<em>$1</em>');
+            
+            // Lists: lines starting with •, -, or *
+            const lines = html.split('\n');
+            let inList = false;
+            let formattedLines = [];
+
+            for (let line of lines) {
+                const listMatch = line.match(/^\s*[•\-*]\s+(.+)/);
+                const numMatch = line.match(/^\s*(\d+\.)\s+(.+)/);
+                
+                if (listMatch) {
+                    if (!inList) {
+                        formattedLines.push('<ul style="margin-bottom: 10px; padding-left: 20px;">');
+                        inList = true;
+                    }
+                    formattedLines.push(`<li>${listMatch[1]}</li>`);
+                } else if (numMatch) {
+                    if (!inList) {
+                        formattedLines.push('<ol style="margin-bottom: 10px; padding-left: 20px;">');
+                        inList = true;
+                    }
+                    formattedLines.push(`<li>${numMatch[2]}</li>`);
+                } else {
+                    if (inList) {
+                        formattedLines.push(formattedLines[formattedLines.length-1].includes('ul') ? '</ul>' : '</ol>');
+                        inList = false;
+                    }
+                    formattedLines.push(line);
+                }
+            }
+            if (inList) formattedLines.push('</ul>');
+
+            // Join and add paragraph breaks for blocks of text
+            let finalHtml = formattedLines.join('\n')
+                .replace(/\n\n+/g, '</p><p style="margin-bottom: 12px;">')
+                .replace(/\n/g, '<br>');
+
+            answerText.innerHTML = `<p style="margin-bottom: 12px;">${finalHtml}</p>`;
+        }
+
+        // ============================================
+        // Render stream metadata (sources, trace, analytics)
+        // ============================================
+        function renderStreamMetadata(event) {
+            const trace = event.retrieval_trace || {};
+            const analytics = event.analytics || {};
+            const sources = event.sources || [];
+
+            // Latency bar (partial — total will update on done)
+            let latencyHtml = `
+                <div class="latency-chip total" id="totalLatencyChip">
+                    Total <span class="value" id="totalLatencyValue">…</span>
+                </div>
+                <div class="latency-chip streaming-chip">⚡ Streaming</div>
+                <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">BM25 <span class="value">${(trace.bm25_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>`;
+
+            if (trace.compress_ms) {
+                latencyHtml += `<div class="latency-chip">MMR <span class="value">${(trace.compress_ms).toFixed(0)}ms</span></div>`;
+            }
+
+            if (event.arxiv_api_fallback) {
+                latencyHtml += `<div class="latency-chip" style="background: var(--warning-bg); border-color: rgba(200, 140, 40, 0.2); color: var(--warning); font-weight: 600;">📚 Global ArXiv Search</div>`;
+            }
+
+            latencyBar.innerHTML = latencyHtml;
+
+            // Analytics
+            renderAnalytics(analytics, sources.length);
+
+            // Sources
+            renderSources(sources);
+        }
+
+        function updateTotalLatency(totalMs) {
+            const el = document.getElementById('totalLatencyValue');
+            if (el) el.textContent = `${totalMs.toFixed(0)}ms`;
+        }
+
+        // ============================================
+        // Render Results (non-streaming fallback)
+        // ============================================
+        function renderResults(data) {
+            const trace = data.retrieval_trace || {};
+
+            // Latency bar
+            let latencyHtml = `
+                <div class="latency-chip total">
+                    Total <span class="value">${data.latency_ms.toFixed(0)}ms</span>
+                </div>`;
+
+            if (data.cached) {
+                latencyHtml += `<div class="latency-chip cached-chip">⚡ Cached</div>`;
+            }
+
+            latencyHtml += `
+                <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">BM25 <span class="value">${(trace.bm25_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">LLM <span class="value">${(trace.generation_ms || 0).toFixed(0)}ms</span></div>`;
+
+            if (trace.compress_ms) {
+                latencyHtml += `<div class="latency-chip">MMR <span class="value">${(trace.compress_ms).toFixed(0)}ms</span></div>`;
+            }
+            latencyBar.innerHTML = latencyHtml;
+
+            // Analytics
+            const analytics = data.analytics || {};
+            const sources = data.sources || [];
+            renderAnalytics(analytics, sources.length);
+
+            // Answer with references extraction
+            processAnswerReferences(data.answer);
+
+            // Sources
+            renderSources(sources);
+
+            resultsSection.classList.add('visible');
+        }
+
+        // ============================================
+        // Shared render helpers
+        // ============================================
+        function renderAnalytics(analytics, sourceCount) {
+            let analyticsHtml = '';
+
+            if (analytics.top_categories && analytics.top_categories.length > 0) {
+                analyticsHtml += `<div class="analytics-card">
+                    <h4>Top Categories</h4>
+                    <ul class="analytics-list">
+                        ${analytics.top_categories.map(c => `<li><span>${escapeHtml(c.name)}</span><span class="count">${c.count}</span></li>`).join('')}
+                    </ul>
+                </div>`;
+            }
+
+            if (analytics.top_authors && analytics.top_authors.length > 0) {
+                analyticsHtml += `<div class="analytics-card">
+                    <h4>Top Authors</h4>
+                    <ul class="analytics-list">
+                        ${analytics.top_authors.map(a => `<li><span>${escapeHtml(a.name)}</span><span class="count">${a.count}</span></li>`).join('')}
+                    </ul>
+                </div>`;
+            }
+
+            if (analytics.total_unique_papers) {
+                analyticsHtml += `<div class="analytics-card">
+                    <h4>Search Coverage</h4>
+                    <ul class="analytics-list">
+                        <li><span>Unique papers considered</span><span class="count">${analytics.total_unique_papers}</span></li>
+                        <li><span>Sources returned</span><span class="count">${sourceCount}</span></li>
+                    </ul>
+                </div>`;
+            }
+            analyticsStrip.innerHTML = analyticsHtml;
+        }
+
+        function renderSources(sources) {
+            sourcesCount.textContent = `${sources.length} Sources Retrieved`;
+
+            sourcesList.innerHTML = sources.map((s, i) => {
+                const categories = (s.categories || '').split(',').filter(c => c.trim()).slice(0, 4);
+                const isFoundational = (s.chunk_id || '').startsWith('arxiv_api_');
+                const tags = categories.map(c => `<span class="source-tag">${c.trim()}</span>`).join('');
+                const foundationalBadge = isFoundational ? '<span class="source-tag" style="background: var(--warning-bg); color: var(--warning); border-color: rgba(200, 140, 40, 0.3); font-weight: 600;">FOUNDATIONAL</span>' : '';
+                const arxivLink = s.paper_id ? `https://arxiv.org/abs/${s.paper_id}` : '#';
+
+                // Show rerank score if > 0, otherwise label as "relevance" (fusion score)
+                const score = s.rerank_score || 0;
+                const scoreLabel = score > 0.01 ? 'relevance' : 'relevance';
+                const scoreDisplay = score > 0 ? score.toFixed(3) : '—';
+
+                return `
+                    <div class="source-card" id="source-${i}">
+                        <div class="source-meta" onclick="toggleSource(document.getElementById('source-${i}'))">
+                            <div class="source-rank">${i + 1}</div>
+                            <div class="source-title">${escapeHtml(s.title)}</div>
+                            <div class="source-score">${scoreLabel} ${scoreDisplay}</div>
+                        </div>
+                        <div class="source-text" onclick="toggleSource(document.getElementById('source-${i}'))">${escapeHtml(s.chunk_text)}</div>
+                        <div class="source-footer">
+                            ${foundationalBadge}
+                            ${tags}
+                            <button class="btn-similar" onclick="event.stopPropagation(); findSimilar('${s.paper_id}', 'source-${i}')">Similar Papers</button>
+                            <a class="source-link" href="${arxivLink}" target="_blank" onclick="event.stopPropagation()">View on ArXiv →</a>
+                        </div>
+                        <div class="similar-container" id="similar-${i}"></div>
+                    </div>
+                `;
+            }).join('');
         }
 
         // ============================================
@@ -918,99 +1319,6 @@
                     }
                 }, delays[i]);
             });
-        }
-
-        // ============================================
-        // Render Results
-        // ============================================
-        function renderResults(data) {
-            const trace = data.retrieval_trace || {};
-
-            // Latency bar
-            let latencyHtml = `
-                <div class="latency-chip total">
-                    Total <span class="value">${data.latency_ms.toFixed(0)}ms</span>
-                </div>`;
-
-            if (data.cached) {
-                latencyHtml += `<div class="latency-chip cached-chip">⚡ Cached</div>`;
-            }
-
-            latencyHtml += `
-                <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">BM25 <span class="value">${(trace.bm25_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">LLM <span class="value">${(trace.generation_ms || 0).toFixed(0)}ms</span></div>`;
-
-            if (trace.compress_ms) {
-                latencyHtml += `<div class="latency-chip">MMR <span class="value">${(trace.compress_ms).toFixed(0)}ms</span></div>`;
-            }
-            latencyBar.innerHTML = latencyHtml;
-
-            // Analytics
-            const analytics = data.analytics || {};
-            let analyticsHtml = '';
-
-            if (analytics.top_categories && analytics.top_categories.length > 0) {
-                analyticsHtml += `<div class="analytics-card">
-                    <h4>Top Categories</h4>
-                    <ul class="analytics-list">
-                        ${analytics.top_categories.map(c => `<li><span>${escapeHtml(c.name)}</span><span class="count">${c.count}</span></li>`).join('')}
-                    </ul>
-                </div>`;
-            }
-
-            if (analytics.top_authors && analytics.top_authors.length > 0) {
-                analyticsHtml += `<div class="analytics-card">
-                    <h4>Top Authors</h4>
-                    <ul class="analytics-list">
-                        ${analytics.top_authors.map(a => `<li><span>${escapeHtml(a.name)}</span><span class="count">${a.count}</span></li>`).join('')}
-                    </ul>
-                </div>`;
-            }
-
-            if (analytics.total_unique_papers) {
-                analyticsHtml += `<div class="analytics-card">
-                    <h4>Search Coverage</h4>
-                    <ul class="analytics-list">
-                        <li><span>Unique papers considered</span><span class="count">${analytics.total_unique_papers}</span></li>
-                        <li><span>Sources returned</span><span class="count">${(data.sources || []).length}</span></li>
-                    </ul>
-                </div>`;
-            }
-            analyticsStrip.innerHTML = analyticsHtml;
-
-            // Answer
-            answerText.textContent = data.answer;
-
-            // Sources
-            const sources = data.sources || [];
-            sourcesCount.textContent = `${sources.length} Sources Retrieved`;
-
-            sourcesList.innerHTML = sources.map((s, i) => {
-                const categories = (s.categories || '').split(',').filter(c => c.trim()).slice(0, 4);
-                const tags = categories.map(c => `<span class="source-tag">${c.trim()}</span>`).join('');
-                const arxivLink = s.paper_id ? `https://arxiv.org/abs/${s.paper_id}` : '#';
-
-                return `
-                    <div class="source-card" id="source-${i}">
-                        <div class="source-meta" onclick="toggleSource(document.getElementById('source-${i}'))">
-                            <div class="source-rank">${i + 1}</div>
-                            <div class="source-title">${escapeHtml(s.title)}</div>
-                            <div class="source-score">score ${s.rerank_score.toFixed(3)}</div>
-                        </div>
-                        <div class="source-text" onclick="toggleSource(document.getElementById('source-${i}'))">${escapeHtml(s.chunk_text)}</div>
-                        <div class="source-footer">
-                            ${tags}
-                            <button class="btn-similar" onclick="event.stopPropagation(); findSimilar('${s.paper_id}', 'source-${i}')">Similar Papers</button>
-                            <a class="source-link" href="${arxivLink}" target="_blank" onclick="event.stopPropagation()">View on ArXiv →</a>
-                        </div>
-                        <div class="similar-container" id="similar-${i}"></div>
-                    </div>
-                `;
-            }).join('');
-
-            resultsSection.classList.add('visible');
         }
 
         // ============================================
@@ -1065,6 +1373,7 @@
         }
 
         function escapeHtml(str) {
+            if (!str) return '';
             const div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;

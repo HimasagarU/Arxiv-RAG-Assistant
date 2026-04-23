@@ -4,7 +4,7 @@ retrieval.py — Hybrid dense + BM25 retrieval pipeline with cross-encoder reran
 This module implements the full retrieval pipeline:
 1. Dense retrieval via Chroma (sentence-transformer embeddings)
 2. Lexical retrieval via BM25
-3. Score normalization and weighted fusion
+3. Reciprocal Rank Fusion (RRF) score fusion
 4. Cross-encoder reranking
 5. Return top-N passages with full trace
 
@@ -22,6 +22,8 @@ import pickle
 import re
 import sqlite3
 import time
+import urllib.request
+import feedparser
 from datetime import datetime
 from typing import Optional
 
@@ -119,15 +121,19 @@ class HybridRetriever:
         k_lex: int = 50,
         merge_top_m: int = 20,
         final_top_n: int = 5,
-        alpha: float = 0.7,
-        beta: float = 0.3,
+        rrf_k: int = 60,
+        alpha: Optional[float] = None,
+        beta: Optional[float] = None,
     ):
         self.k_dense = k_dense
         self.k_lex = k_lex
         self.merge_top_m = merge_top_m
         self.final_top_n = final_top_n
-        self.alpha = alpha
-        self.beta = beta
+        self.rrf_k = int(os.getenv("RRF_K", str(rrf_k)))
+
+        # Keep backward compatibility with older callers passing alpha/beta.
+        if alpha is not None or beta is not None:
+            log.warning("alpha/beta fusion params are deprecated; using RRF fusion instead.")
 
         # Resolve paths from env
         chroma_dir = chroma_dir or os.getenv("CHROMA_DIR", "data/chroma_db")
@@ -254,11 +260,12 @@ class HybridRetriever:
     # Recency boosting
     # ------------------------------------------------------------------
 
-    def _apply_recency_boost(self, candidates: list[dict], boost_weight: float = 0.05) -> list[dict]:
+    def _apply_recency_boost(self, candidates: list[dict], boost_weight: float = 0.2) -> list[dict]:
         """
         Apply a small recency boost to fusion scores.
         Newer papers get a slight advantage. Uses exponential decay
         with a half-life of ~2 years.
+        Scaled relative to RRF magnitude to avoid overwhelming rank fusion.
         """
         now = datetime.utcnow()
         
@@ -281,7 +288,7 @@ class HybridRetriever:
                         age_years = (now - pub_date.replace(tzinfo=None)).days / 365.25
                         # Exponential decay: half-life of 2 years
                         recency_factor = math.exp(-0.347 * age_years)  # ln(2)/2 ≈ 0.347
-                        c["recency_boost"] = recency_factor * boost_weight
+                        c["recency_boost"] = (recency_factor * boost_weight) / max(float(self.rrf_k), 1.0)
                         c["fusion_score"] = c.get("fusion_score", 0) + c["recency_boost"]
                     except (ValueError, TypeError):
                         c["recency_boost"] = 0.0
@@ -431,8 +438,14 @@ class HybridRetriever:
     def _merge_and_normalize(
         self, dense_candidates: list[dict], bm25_candidates: list[dict]
     ) -> list[dict]:
-        """Merge dense and BM25 candidates, normalize scores, compute fusion score."""
+        """Merge dense and BM25 candidates and compute RRF fusion score."""
         merged = {}
+        dense_rank_by_id = {
+            c["chunk_id"]: rank for rank, c in enumerate(dense_candidates, start=1)
+        }
+        bm25_rank_by_id = {
+            c["chunk_id"]: rank for rank, c in enumerate(bm25_candidates, start=1)
+        }
 
         for c in dense_candidates:
             merged[c["chunk_id"]] = {
@@ -491,23 +504,15 @@ class HybridRetriever:
 
         candidates = list(merged.values())
 
-        # Normalize scores (min-max per source)
-        dense_scores = [c["dense_score_raw"] for c in candidates if c["dense_score_raw"] > 0]
-        bm25_scores = [c["bm25_score_raw"] for c in candidates if c["bm25_score_raw"] > 0]
-
-        dense_min = min(dense_scores) if dense_scores else 0
-        dense_max = max(dense_scores) if dense_scores else 1
-        bm25_min = min(bm25_scores) if bm25_scores else 0
-        bm25_max = max(bm25_scores) if bm25_scores else 1
-
-        dense_range = dense_max - dense_min if dense_max > dense_min else 1.0
-        bm25_range = bm25_max - bm25_min if bm25_max > bm25_min else 1.0
-
         for c in candidates:
-            c["dense_score_norm"] = (c["dense_score_raw"] - dense_min) / dense_range if c["dense_score_raw"] > 0 else 0.0
-            c["bm25_score_norm"] = (c["bm25_score_raw"] - bm25_min) / bm25_range if c["bm25_score_raw"] > 0 else 0.0
-            c["fusion_score"] = (self.alpha * c["dense_score_norm"] +
-                                 self.beta * c["bm25_score_norm"])
+            dense_rank = dense_rank_by_id.get(c["chunk_id"])
+            bm25_rank = bm25_rank_by_id.get(c["chunk_id"])
+
+            c["dense_rank"] = dense_rank
+            c["bm25_rank"] = bm25_rank
+            c["dense_rrf"] = 1.0 / (self.rrf_k + dense_rank) if dense_rank else 0.0
+            c["bm25_rrf"] = 1.0 / (self.rrf_k + bm25_rank) if bm25_rank else 0.0
+            c["fusion_score"] = c["dense_rrf"] + c["bm25_rrf"]
 
         candidates.sort(key=lambda x: x["fusion_score"], reverse=True)
         return candidates[:self.merge_top_m]
@@ -661,11 +666,13 @@ class HybridRetriever:
         trace["bm25_ids"] = [c["chunk_id"] for c in bm25_candidates[:10]]
         trace["bm25_enabled"] = self.enable_bm25
 
-        # Step 3: Merge and normalize
+        # Step 3: Merge and RRF fusion
         t3 = time.time()
         merged = self._merge_and_normalize(dense_candidates, bm25_candidates)
         trace["merge_ms"] = round((time.time() - t3) * 1000, 1)
         trace["merged_count"] = len(merged)
+        trace["fusion_method"] = "rrf"
+        trace["rrf_k"] = self.rrf_k
 
         # Step 3.5: Apply recency boost
         if enable_recency_boost:
@@ -675,6 +682,22 @@ class HybridRetriever:
         # Step 3.6: Filter by year (post-filter)
         if start_year:
             merged = self._filter_by_year(merged, start_year=start_year)
+
+        # Step 3.7: Relevance check & ArXiv API Fallback (Foundational Gap Fix)
+        # If best local score is low, fetch foundational abstracts from official API
+        best_score = merged[0].get("fusion_score", 0) if merged else 0
+        trace["local_relevance"] = round(float(best_score), 4)
+        
+        if best_score < 0.05:
+            trace["arxiv_api_fallback"] = True
+            foundational = self._fetch_foundational_papers(query, top_n=2)
+            if foundational:
+                # Add to context
+                merged.extend(foundational)
+                # Re-sort just to be sure, though foundational has 0.05
+                merged.sort(key=lambda x: x.get("fusion_score", 0), reverse=True)
+        else:
+            trace["arxiv_api_fallback"] = False
 
         # Step 4: Cross-encoder reranking
         t4 = time.time()
@@ -721,6 +744,42 @@ class HybridRetriever:
             "trace": trace,
             "analytics": analytics,
         }
+
+    def _fetch_foundational_papers(self, query: str, top_n: int = 3) -> list[dict]:
+        """
+        Fetch foundational paper abstracts directly from the ArXiv API.
+        Useful when local SOTA-focused index lacks foundational context.
+        """
+        try:
+            log.info(f"Triggering ArXiv API fallback for foundational papers: '{query}'")
+            # Search ArXiv for the query, sorted by relevance (often foundational papers rank high)
+            encoded_query = urllib.parse.quote(query)
+            # We search for the query in all fields, limited to top_n
+            url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_query}&start=0&max_results={top_n}&sortBy=relevance&sortOrder=descending"
+            
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                feed = feedparser.parse(resp.read())
+            
+            foundational = []
+            for entry in feed.entries:
+                paper_id = entry.id.split('/abs/')[-1].split('v')[0]
+                foundational.append({
+                    "chunk_id": f"arxiv_api_{paper_id}",
+                    "chunk_text": f"[Foundational Abstract] {entry.summary}",
+                    "metadata": {
+                        "paper_id": paper_id,
+                        "title": entry.title.replace('\n', ' '),
+                        "authors": ", ".join(a.name for a in entry.authors),
+                        "categories": ", ".join(t.term for t in entry.tags),
+                    },
+                    "fusion_score": 0.05, # Give it a "relevant-enough" score to stay in context
+                    "rerank_score": 0.05,
+                    "sources": ["arxiv_api"],
+                })
+            return foundational
+        except Exception as e:
+            log.warning(f"ArXiv API fallback failed: {e}")
+            return []
 
     def retrieve_ids(self, query: str, top_n: int = None) -> list[str]:
         """Convenience method that returns only chunk IDs (for evaluation)."""

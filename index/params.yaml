@@ -22,8 +22,8 @@ retrieval:
   k_lex: 50
   merge_top_m: 20
   final_top_n: 5
-  alpha: 0.7  # weight for dense scores
-  beta: 0.3   # weight for BM25 scores
+  fusion: "rrf"
+  rrf_k: 60
 
 # --- Reranker ---
 reranker:

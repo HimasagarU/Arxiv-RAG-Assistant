@@ -57,7 +57,7 @@ def chunk_text(
 
     Returns list of dicts with 'text' and 'token_count'.
     """
-    tokens = tokenizer.encode(text)
+    tokens = tokenizer.encode(text, disallowed_special=())
     total_tokens = len(tokens)
 
     if total_tokens <= chunk_size:

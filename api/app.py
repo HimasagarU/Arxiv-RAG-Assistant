@@ -24,7 +24,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -224,26 +224,48 @@ if _frontend_dir.is_dir():
 # ---------------------------------------------------------------------------
 
 def build_prompt(query: str, compressed_context: str, passages: list[dict]) -> str:
-    """Build a RAG prompt using compressed context and source references."""
-    sources_ref = ""
-    for i, p in enumerate(passages):
-        sources_ref += f"[Source {i+1}: {p['chunk_id']}] — {p.get('title', 'N/A')}\n"
+    """Build a RAG prompt using Feynman technique with numbered citations."""
+    # Build numbered source list for the model to reference
+    sources_block = ""
+    for i, p in enumerate(passages, 1):
+        title = p.get('title', 'Untitled')
+        sources_block += f"[{i}] \"{title}\"\n"
 
-    prompt = f"""You are a helpful research assistant specializing in AI and Machine Learning papers from ArXiv.
+    prompt = f"""You are an expert AI/ML research assistant. Your goal is to give a thorough,
+well-structured answer that a smart graduate student would find genuinely useful.
 
-Answer the following question using ONLY the provided context. Be concise and accurate.
-Cite your sources using [Source: chunk_id] format.
-If the sources don't contain enough information to answer, say so explicitly.
+INSTRUCTIONS:
+1. Read ALL provided source passages carefully before answering.
+2. Use the Feynman Technique: explain concepts clearly so a knowledgeable non-specialist
+   can follow. Avoid jargon without explanation.
+3. Think step-by-step about what the question is really asking, then synthesize.
+4. Use numbered citations like [1], [2] to reference sources.
+   NEVER write "Source: chunk_id" or mention chunk IDs.
+5. If information is insufficient, say so honestly rather than speculating.
 
-Context:
+FORMAT YOUR ANSWER EXACTLY LIKE THIS:
+1. **Technical Fact Audit**: List the 3-5 most important technical facts/data points found in the sources.
+2. **Analysis**: Synthesize the answer using those facts.
+3. **Executive Summary**: A **bold 1-2 sentence executive summary**.
+4. **References**: Numbered source titles.
+
+Strict Rules:
+- Prioritize technical nuance and precision over simplicity.
+- Use the Feynman Technique for CLARITY, but do not omit complex details.
+- The very first section MUST be the Technical Fact Audit.
+- Wrap the Executive Summary in double asterisks **like this**.
+
+---
+
+SOURCE PASSAGES:
 {compressed_context}
 
-Source References:
-{sources_ref}
+AVAILABLE SOURCES:
+{sources_block}
 
-Question: {query}
+QUESTION: {query}
 
-Answer:"""
+ANSWER:"""
     return prompt
 
 
@@ -261,6 +283,13 @@ def generate_answer(prompt: str) -> str:
         return _generate_local_fallback(prompt)
 
 
+GROQ_SYSTEM_PROMPT = (
+    "You are an expert AI/ML research assistant. Give thorough, well-structured answers "
+    "using the Feynman Technique. Use numbered citations [1], [2] etc. to reference sources. "
+    "CRITICAL: Always start with a 1-2 sentence executive summary wrapped in double asterisks **like this**."
+)
+
+
 def _generate_groq(prompt: str, api_key: str) -> str:
     """Generate answer using Groq API with Llama 3.3 70B."""
     try:
@@ -270,18 +299,12 @@ def _generate_groq(prompt: str, api_key: str) -> str:
 
         chat_completion = client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful research assistant specializing in AI and Machine Learning papers from ArXiv. Answer concisely and cite sources using [Source: chunk_id] format.",
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
+                {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0.3,
-            max_tokens=1024,
+            temperature=0.2,
+            max_tokens=2048,
             top_p=0.9,
         )
 
@@ -290,6 +313,30 @@ def _generate_groq(prompt: str, api_key: str) -> str:
     except Exception as e:
         log.error(f"Groq API error: {e}")
         return f"[Groq API error: {e}] — Falling back to source extraction.\n\n" + _generate_local_fallback(prompt)
+
+
+def _generate_groq_stream(prompt: str, api_key: str):
+    """Streaming generator: yields answer tokens one-by-one from Groq."""
+    from groq import Groq
+
+    client = Groq(api_key=api_key)
+
+    stream = client.chat.completions.create(
+        messages=[
+            {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        model="llama-3.3-70b-versatile",
+        temperature=0.2,
+        max_tokens=2048,
+        top_p=0.9,
+        stream=True,
+    )
+
+    for chunk in stream:
+        delta = chunk.choices[0].delta
+        if delta and delta.content:
+            yield delta.content
 
 
 def _generate_local_fallback(prompt: str) -> str:
@@ -397,9 +444,9 @@ async def query_endpoint(request: QueryRequest):
     trace = result["trace"]
     analytics = result.get("analytics", {})
 
-    # Context compression via MMR
+    # Context compression via MMR (Increased budget for better accuracy)
     t_compress = time.time()
-    compressed_context = _state["retriever"].compress_context(request.query, passages)
+    compressed_context = _state["retriever"].compress_context(request.query, passages, max_sentences=40)
     trace["compress_ms"] = round((time.time() - t_compress) * 1000, 1)
 
     # Generate answer using compressed context
@@ -453,6 +500,101 @@ async def query_endpoint(request: QueryRequest):
     })
 
     return QueryResponse(**response_data)
+
+
+@app.post("/query/stream")
+async def query_stream_endpoint(request: QueryRequest):
+    """
+    Streaming version of /query.
+    Returns an SSE stream: first event is metadata (sources, trace, analytics),
+    then each subsequent event is an answer token, ending with [DONE].
+    """
+    if _state["retriever"] is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Retriever not initialized. Please ensure indexes are built.",
+        )
+
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    if not groq_api_key:
+        raise HTTPException(
+            status_code=503,
+            detail="Streaming requires GROQ_API_KEY to be set.",
+        )
+
+    t0 = time.time()
+    _state["query_count"] += 1
+
+    # Retrieve with filters
+    result = _state["retriever"].retrieve(
+        request.query,
+        top_n=request.top_k,
+        category=request.category,
+        author=request.author,
+        start_year=request.start_year,
+    )
+    passages = result["passages"]
+    trace = result["trace"]
+    analytics = result.get("analytics", {})
+
+    # Context compression (Increased budget for better accuracy)
+    compressed_context = _state["retriever"].compress_context(request.query, passages, max_sentences=40)
+
+    # Build prompt
+    prompt = build_prompt(request.query, compressed_context, passages)
+
+    # Build sources list
+    sources = [
+        {
+            "chunk_id": p["chunk_id"],
+            "paper_id": p["paper_id"],
+            "title": p["title"],
+            "authors": p.get("authors", ""),
+            "categories": p.get("categories", ""),
+            "chunk_text": p["chunk_text"],
+            "rerank_score": p.get("rerank_score", 0.0),
+        }
+        for p in passages
+    ]
+
+    retrieval_ms = round((time.time() - t0) * 1000, 1)
+
+    def event_generator():
+        """SSE generator: metadata event, then token events, then DONE."""
+        # First event: metadata (sources, trace, analytics)
+        meta_payload = json.dumps({
+            "type": "metadata",
+            "sources": sources,
+            "retrieval_trace": trace,
+            "analytics": analytics,
+            "retrieval_ms": retrieval_ms,
+            "arxiv_api_fallback": trace.get("arxiv_api_fallback", False)
+        })
+        yield f"data: {meta_payload}\n\n"
+
+        # Stream answer tokens
+        try:
+            for token in _generate_groq_stream(prompt, groq_api_key):
+                token_payload = json.dumps({"type": "token", "content": token})
+                yield f"data: {token_payload}\n\n"
+        except Exception as e:
+            error_payload = json.dumps({"type": "error", "message": str(e)})
+            yield f"data: {error_payload}\n\n"
+
+        # Done event
+        total_ms = round((time.time() - t0) * 1000, 1)
+        done_payload = json.dumps({"type": "done", "total_ms": total_ms})
+        yield f"data: {done_payload}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/paper/{paper_id}", response_model=PaperResponse)

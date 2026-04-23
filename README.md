@@ -23,7 +23,7 @@ A hybrid Retrieval-Augmented Generation (RAG) system for ArXiv research papers. 
 ```
 Query → [Embedding] → Dense Retrieval (Chroma)
                      ↘
-                      Merge + Score Fusion (α·dense + β·BM25) + Recency Boost
+                      Merge + Score Fusion (RRF) + Recency Boost
                      ↗                    ↓
 Query → [Tokenize]  → BM25 Retrieval    Cross-Encoder Rerank
                                           ↓
@@ -50,6 +50,9 @@ Optional full-text mode (slower, larger index, better long-answer recall):
 ```bash
 # Enrich with PDF body text for up to 500 papers by default
 python ingest/ingest_arxiv.py --max-papers 20000 --include-full-text
+
+# Enrich existing DB rows only (skip ArXiv metadata refetch)
+python ingest/ingest_arxiv.py --enrich-existing-full-text --max-fulltext-papers 0
 
 # Chunk using full text when available, fallback to abstract
 python ingest/chunking.py --source auto

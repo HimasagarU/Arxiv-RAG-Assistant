@@ -92,7 +92,7 @@ class Reranker:
 
         if not self.enabled:
             for p in passages:
-                p["rerank_score"] = 0.0
+                p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
         try:
@@ -100,12 +100,12 @@ class Reranker:
         except Exception as e:
             log.warning(f"Failed to load FlashRank model ({self.model_name}): {e}")
             for p in passages:
-                p["rerank_score"] = 0.0
+                p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
         if self.ranker is None:
             for p in passages:
-                p["rerank_score"] = 0.0
+                p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
         # FlashRank expects passages as list of dicts with "id" and "text" keys
@@ -122,7 +122,7 @@ class Reranker:
         except Exception as e:
             log.warning(f"FlashRank rerank failed; using fusion order fallback: {e}")
             for p in passages:
-                p["rerank_score"] = 0.0
+                p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
         # Map scores back to original passages

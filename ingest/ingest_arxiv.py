@@ -3,7 +3,8 @@ ingest_arxiv.py -- Fetch papers from ArXiv API and store metadata in SQLite.
 
 Usage:
     conda run -n pytorch python ingest/ingest_arxiv.py \
-        [--categories cs.AI,cs.LG] [--max-papers 5000] [--include-full-text]
+    [--categories cs.AI,cs.LG] [--max-papers 5000] [--include-full-text]
+    [--enrich-existing-full-text] [--start-offset 0]
 """
 
 import argparse
@@ -34,7 +35,13 @@ DEFAULT_DB_PATH = os.getenv("DB_PATH", "data/arxiv_papers.db")
 DEFAULT_PDF_TIMEOUT = int(os.getenv("PDF_TIMEOUT", "30"))
 DEFAULT_MAX_FULLTEXT_CHARS = int(os.getenv("MAX_FULLTEXT_CHARS", "150000"))
 DEFAULT_MAX_FULLTEXT_PAPERS = int(os.getenv("MAX_FULLTEXT_PAPERS", "500"))
-RESULTS_PER_PAGE = 100  # ArXiv API max per request
+DEFAULT_USER_AGENT = os.getenv(
+    "ARXIV_USER_AGENT", "ArxivBot/1.0 (your_email@example.com)"
+)
+RESULTS_PER_PAGE = 50  # Intentionally conservative for API stability.
+ARXIV_REQUEST_TIMEOUT = 30
+ARXIV_REQUEST_MAX_RETRIES = 5
+ARXIV_RETRY_INITIAL_DELAY = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -108,6 +115,87 @@ def upsert_paper(conn: sqlite3.Connection, paper: dict):
     )
 
 
+def get_papers_missing_full_text(
+    conn: sqlite3.Connection,
+    categories: list[str] | None = None,
+    limit: int = 0,
+) -> list[dict]:
+    """Load existing DB rows missing full_text for enrichment-only mode."""
+    conn.row_factory = sqlite3.Row
+
+    where_clauses = ["(full_text IS NULL OR TRIM(full_text) = '')"]
+    params: list[object] = []
+
+    cleaned_categories = [c.strip() for c in (categories or []) if c.strip()]
+    if cleaned_categories:
+        cat_filters = []
+        for cat in cleaned_categories:
+            cat_filters.append("categories LIKE ?")
+            params.append(f"%{cat}%")
+        where_clauses.append("(" + " OR ".join(cat_filters) + ")")
+
+    query = (
+        "SELECT paper_id, title, abstract, authors, categories, pdf_url, published, updated, full_text "
+        "FROM papers "
+        f"WHERE {' AND '.join(where_clauses)} "
+        "ORDER BY published DESC"
+    )
+
+    if limit and limit > 0:
+        query += " LIMIT ?"
+        params.append(limit)
+
+    rows = conn.execute(query, params).fetchall()
+    return [dict(row) for row in rows]
+
+
+def enrich_existing_full_text(
+    conn: sqlite3.Connection,
+    categories: list[str],
+    max_fulltext_papers: int,
+    pdf_timeout: int,
+    max_fulltext_chars: int,
+) -> int:
+    """Fetch full_text for existing rows missing it, without ArXiv metadata refetch."""
+    limit = max_fulltext_papers if max_fulltext_papers > 0 else 0
+    targets = get_papers_missing_full_text(conn, categories=categories, limit=limit)
+
+    if not targets:
+        log.info("No papers are missing full_text for selected categories.")
+        return 0
+
+    log.info(
+        f"Enriching full_text for {len(targets)} existing papers "
+        f"(timeout={pdf_timeout}s, max_chars={max_fulltext_chars})"
+    )
+
+    enriched = 0
+    for paper in tqdm(targets, desc="Enriching existing full text", unit="paper"):
+        pdf_url = (paper.get("pdf_url") or "").strip()
+        if not pdf_url:
+            pdf_url = f"https://arxiv.org/pdf/{paper['paper_id']}.pdf"
+
+        full_text = fetch_pdf_text(
+            pdf_url,
+            timeout=pdf_timeout,
+            max_chars=max_fulltext_chars,
+        )
+        if not full_text:
+            continue
+
+        conn.execute(
+            "UPDATE papers SET full_text = ? WHERE paper_id = ?",
+            (full_text, paper["paper_id"]),
+        )
+        enriched += 1
+
+        if enriched % 25 == 0:
+            conn.commit()
+
+    conn.commit()
+    return enriched
+
+
 # ---------------------------------------------------------------------------
 # ArXiv API helpers
 # ---------------------------------------------------------------------------
@@ -116,13 +204,21 @@ def upsert_paper(conn: sqlite3.Connection, paper: dict):
 def build_query(categories: list[str]) -> str:
     """Build ArXiv search query string from category list."""
     cat_queries = [f"cat:{cat}" for cat in categories]
-    return "+OR+".join(cat_queries)
+    # Keep logical operators as plain text; requests will URL-encode safely.
+    return " OR ".join(cat_queries)
 
 
 def clean_text(text: str) -> str:
     """Clean up whitespace and newlines from ArXiv text fields."""
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def sanitize_text(text: str) -> str:
+    """Remove non-encodable characters that can break SQLite writes."""
+    if not text:
+        return ""
+    return text.encode("utf-8", errors="ignore").decode("utf-8", errors="ignore")
 
 
 def extract_arxiv_id(entry_id: str) -> str:
@@ -153,13 +249,13 @@ def parse_entry(entry) -> dict:
 
     return {
         "paper_id": paper_id,
-        "title": clean_text(entry.get("title", "")),
-        "abstract": clean_text(entry.get("summary", "")),
-        "authors": authors,
-        "categories": categories,
-        "pdf_url": pdf_url,
-        "published": entry.get("published", ""),
-        "updated": entry.get("updated", ""),
+        "title": sanitize_text(clean_text(entry.get("title", ""))),
+        "abstract": sanitize_text(clean_text(entry.get("summary", ""))),
+        "authors": sanitize_text(authors),
+        "categories": sanitize_text(categories),
+        "pdf_url": sanitize_text(pdf_url),
+        "published": sanitize_text(entry.get("published", "")),
+        "updated": sanitize_text(entry.get("updated", "")),
         "full_text": None,
     }
 
@@ -178,7 +274,11 @@ def fetch_pdf_text(
         ) from e
 
     try:
-        response = requests.get(pdf_url, timeout=timeout)
+        response = requests.get(
+            pdf_url,
+            timeout=timeout,
+            headers={"User-Agent": DEFAULT_USER_AGENT},
+        )
         response.raise_for_status()
         reader = PdfReader(io.BytesIO(response.content))
     except Exception as e:
@@ -189,7 +289,7 @@ def fetch_pdf_text(
     total_chars = 0
 
     for page in reader.pages:
-        page_text = clean_text(page.extract_text() or "")
+        page_text = sanitize_text(clean_text(page.extract_text() or ""))
         if not page_text:
             continue
 
@@ -203,7 +303,7 @@ def fetch_pdf_text(
         parts.append(page_text)
         total_chars += len(page_text)
 
-    return clean_text(" ".join(parts))
+    return sanitize_text(clean_text(" ".join(parts)))
 
 
 def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
@@ -211,6 +311,7 @@ def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
     query = build_query(categories)
     papers = []
     start = 0
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
 
     pbar = tqdm(total=max_papers, desc="Fetching papers", unit="paper")
 
@@ -224,13 +325,37 @@ def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
             "sortOrder": "descending",
         }
 
-        try:
-            response = requests.get(ARXIV_API_URL, params=params, timeout=30)
-            response.raise_for_status()
-        except requests.RequestException as e:
-            log.warning(f"Request failed at offset {start}: {e}. Retrying in 10s...")
-            time.sleep(10)
-            continue
+        response = None
+        delay = ARXIV_RETRY_INITIAL_DELAY
+
+        for attempt in range(1, ARXIV_REQUEST_MAX_RETRIES + 1):
+            try:
+                response = requests.get(
+                    ARXIV_API_URL,
+                    params=params,
+                    timeout=ARXIV_REQUEST_TIMEOUT,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                break
+            except requests.RequestException as e:
+                if attempt == ARXIV_REQUEST_MAX_RETRIES:
+                    log.error(
+                        f"Request failed at offset {start} after {attempt} attempts: {e}"
+                    )
+                    response = None
+                    break
+
+                log.warning(
+                    f"Request failed at offset {start} (attempt {attempt}/{ARXIV_REQUEST_MAX_RETRIES}): {e}. "
+                    f"Retrying in {delay}s..."
+                )
+                time.sleep(delay)
+                delay *= 2
+
+        if response is None:
+            log.error("Stopping fetch due to repeated request failures.")
+            break
 
         feed = feedparser.parse(response.text)
         entries = feed.entries
@@ -253,6 +378,151 @@ def fetch_papers(categories: list[str], max_papers: int) -> list[dict]:
     pbar.close()
     log.info(f"Fetched {len(papers)} papers total")
     return papers
+
+
+def _fetch_arxiv_feed(params: dict, start: int) -> str | None:
+    """Fetch one ArXiv API page with retries and user-agent headers."""
+    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    response = None
+    delay = ARXIV_RETRY_INITIAL_DELAY
+
+    for attempt in range(1, ARXIV_REQUEST_MAX_RETRIES + 1):
+        log.info(
+            f"Requesting arXiv page start={start}, max_results={params.get('max_results')}, attempt={attempt}/{ARXIV_REQUEST_MAX_RETRIES}"
+        )
+        try:
+            response = requests.get(
+                ARXIV_API_URL,
+                params=params,
+                timeout=ARXIV_REQUEST_TIMEOUT,
+                headers=headers,
+            )
+            response.raise_for_status()
+            return response.text
+        except requests.RequestException as e:
+            if attempt == ARXIV_REQUEST_MAX_RETRIES:
+                log.error(
+                    f"Request failed at offset {start} after {attempt} attempts: {e}"
+                )
+                return None
+
+            log.warning(
+                f"Request failed at offset {start} (attempt {attempt}/{ARXIV_REQUEST_MAX_RETRIES}): {e}. "
+                f"Retrying in {delay}s..."
+            )
+            time.sleep(delay)
+            delay *= 2
+
+    return None
+
+
+def ingest_papers_streaming(
+    categories: list[str],
+    max_papers: int,
+    db_path: str,
+    include_full_text: bool = False,
+    pdf_timeout: int = DEFAULT_PDF_TIMEOUT,
+    max_fulltext_chars: int = DEFAULT_MAX_FULLTEXT_CHARS,
+    max_fulltext_papers: int = DEFAULT_MAX_FULLTEXT_PAPERS,
+    start_offset: int = 0,
+) -> tuple[int, int]:
+    """Fetch, enrich, and upsert papers incrementally so progress is visible immediately."""
+    query = build_query(categories)
+    conn = init_db(db_path)
+    fetched = 0
+    stored = 0
+    fulltext_enriched = 0
+    start = max(0, start_offset)
+    resume_base = start_offset if start_offset > 0 else 0
+
+    if start_offset > 0:
+        log.info(f"Resuming ingestion from offset {start_offset}")
+
+    log.info(
+        f"Streaming ingest started for categories={categories}, max_papers={max_papers}, "
+        f"include_full_text={include_full_text}, max_fulltext_papers={max_fulltext_papers}"
+    )
+
+    while start < max_papers:
+        batch_size = min(RESULTS_PER_PAGE, max_papers - start)
+        params = {
+            "search_query": query,
+            "start": start,
+            "max_results": batch_size,
+            "sortBy": "submittedDate",
+            "sortOrder": "descending",
+        }
+
+        log.info(
+            f"[{categories[0] if categories else 'all'}] Fetching page start={start}, batch_size={batch_size}, "
+            f"stored={stored}, fetched={fetched}, full_text={fulltext_enriched}"
+        )
+
+        feed_text = _fetch_arxiv_feed(params, start)
+        if feed_text is None:
+            log.error("Stopping fetch due to repeated request failures.")
+            break
+
+        feed = feedparser.parse(feed_text)
+        entries = feed.entries
+
+        if not entries:
+            log.info(f"No more entries at offset {start}. Total fetched: {fetched}")
+            break
+
+        for entry in entries:
+            if fetched >= max_papers:
+                break
+
+            paper = parse_entry(entry)
+            if not paper["abstract"] or not paper["title"]:
+                continue
+
+            fetched += 1
+            overall_index = resume_base + fetched
+            remaining_total = max(0, max_papers - start_offset)
+
+            if include_full_text and (max_fulltext_papers == 0 or fulltext_enriched < max_fulltext_papers):
+                log.info(
+                    f"[{categories[0] if categories else 'all'}] Full-text {fetched}/{remaining_total} "
+                    f"(overall {overall_index}/{max_papers}) paper_id={paper['paper_id']}"
+                )
+                full_text = fetch_pdf_text(
+                    paper["pdf_url"],
+                    timeout=pdf_timeout,
+                    max_chars=max_fulltext_chars,
+                )
+                if full_text:
+                    paper["full_text"] = full_text
+                    fulltext_enriched += 1
+
+            upsert_paper(conn, paper)
+            stored += 1
+
+            if stored % 10 == 0 or stored == 1:
+                conn.commit()
+                log.info(
+                    f"[{categories[0] if categories else 'all'}] Stored {stored}/{remaining_total} papers "
+                    f"(overall {overall_index}/{max_papers}, fetched={fetched}, full_text={fulltext_enriched})"
+                )
+
+        conn.commit()
+        log.info(
+            f"[{categories[0] if categories else 'all'}] Page complete: start={start}, "
+            f"fetched={fetched}, stored={stored}, full_text={fulltext_enriched}, overall={resume_base + fetched}/{max_papers}"
+        )
+
+        start += len(entries)
+
+        # ArXiv API rate limit: 1 request per 3 seconds
+        time.sleep(3)
+
+    count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+    conn.close()
+    log.info(
+        f"Streaming ingest finished: stored={stored}, full_text={fulltext_enriched}, db_total={count}"
+    )
+    return stored, fulltext_enriched
 
 
 # ---------------------------------------------------------------------------
@@ -286,6 +556,14 @@ def main():
         help="Fetch and extract full text from paper PDFs (slower, larger storage)",
     )
     parser.add_argument(
+        "--enrich-existing-full-text",
+        action="store_true",
+        help=(
+            "Only enrich existing DB rows missing full_text; "
+            "skip ArXiv metadata fetch"
+        ),
+    )
+    parser.add_argument(
         "--pdf-timeout",
         type=int,
         default=DEFAULT_PDF_TIMEOUT,
@@ -303,55 +581,58 @@ def main():
         default=DEFAULT_MAX_FULLTEXT_PAPERS,
         help="Max papers to enrich with full text; 0 means all",
     )
+    parser.add_argument(
+        "--start-offset",
+        type=int,
+        default=0,
+        help="Resume arXiv pagination from this offset (e.g. 850 to continue after 850 papers)",
+    )
     args = parser.parse_args()
 
     categories = [c.strip() for c in args.categories.split(",")]
+    log.info(f"Using categories: {categories}")
+
+    if args.enrich_existing_full_text:
+        conn = init_db(args.db_path)
+        enriched = enrich_existing_full_text(
+            conn,
+            categories=categories,
+            max_fulltext_papers=args.max_fulltext_papers,
+            pdf_timeout=args.pdf_timeout,
+            max_fulltext_chars=args.max_fulltext_chars,
+        )
+        count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
+        log.info(f"Database now contains {count} papers")
+        log.info(f"Enriched full_text for {enriched} papers")
+        conn.close()
+        return
+
     log.info(f"Ingesting up to {args.max_papers} papers from categories: {categories}")
+    if args.include_full_text:
+        log.info(
+            f"Full-text mode enabled; progress will be logged as papers are stored "
+            f"(pdf_timeout={args.pdf_timeout}s, max_chars={args.max_fulltext_chars})"
+        )
 
-    # Fetch papers
-    papers = fetch_papers(categories, args.max_papers)
+    stored, enriched = ingest_papers_streaming(
+        categories=categories,
+        max_papers=args.max_papers,
+        db_path=args.db_path,
+        include_full_text=args.include_full_text,
+        pdf_timeout=args.pdf_timeout,
+        max_fulltext_chars=args.max_fulltext_chars,
+        max_fulltext_papers=args.max_fulltext_papers,
+        start_offset=args.start_offset,
+    )
 
-    if not papers:
-        log.error("No papers fetched. Check network / ArXiv API.")
+    if stored == 0:
+        log.error("No papers ingested. Check network / ArXiv API.")
         sys.exit(1)
 
-    if args.include_full_text:
-        full_text_limit = (
-            len(papers)
-            if args.max_fulltext_papers == 0
-            else min(args.max_fulltext_papers, len(papers))
-        )
-        log.info(
-            f"Fetching full text from PDFs for up to {full_text_limit} papers "
-            f"(timeout={args.pdf_timeout}s, max_chars={args.max_fulltext_chars})"
-        )
-
-        enriched = 0
-        for paper in tqdm(papers[:full_text_limit], desc="Fetching full text", unit="paper"):
-            full_text = fetch_pdf_text(
-                paper["pdf_url"],
-                timeout=args.pdf_timeout,
-                max_chars=args.max_fulltext_chars,
-            )
-            if full_text:
-                paper["full_text"] = full_text
-                enriched += 1
-
-        log.info(f"Extracted full text for {enriched}/{full_text_limit} papers")
-
-    # Store in SQLite
-    conn = init_db(args.db_path)
-    log.info(f"Upserting {len(papers)} papers into {args.db_path}")
-
-    for paper in tqdm(papers, desc="Storing papers", unit="paper"):
-        upsert_paper(conn, paper)
-
-    conn.commit()
-
-    # Summary
+    conn = sqlite3.connect(args.db_path)
     count = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
-    log.info(f"Database now contains {count} papers")
     conn.close()
+    log.info(f"Database now contains {count} papers")
 
 
 if __name__ == "__main__":
