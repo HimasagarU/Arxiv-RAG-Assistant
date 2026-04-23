@@ -1,15 +1,15 @@
 """
 reranker.py — Cross-encoder reranking for candidate passages.
 
-Uses FlashRank (ONNX-based, no PyTorch needed) for ultra-lightweight
-cross-encoder reranking. Default model: ms-marco-MiniLM-L-6-v2.
+Uses sentence-transformers CrossEncoder.
 """
 
 import logging
 import os
 from typing import Optional
 
-from flashrank import Ranker, RerankRequest
+# We use sentence_transformers instead of flashrank
+from sentence_transformers import CrossEncoder
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,18 +19,18 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 
-def _normalize_flashrank_model_name(model_name: str) -> str:
+def _normalize_hf_model_name(model_name: str) -> str:
     """
-    FlashRank expects short model names (e.g. ms-marco-MiniLM-L-6-v2).
-    Accept HuggingFace-style names and normalize to the final segment.
+    Ensure the model name is properly formatted for HuggingFace.
+    If no namespace (like 'cross-encoder/') is provided, add it.
     """
-    if "/" in model_name:
-        return model_name.rsplit("/", 1)[-1]
+    if "/" not in model_name:
+        return f"cross-encoder/{model_name}"
     return model_name
 
 
 class Reranker:
-    """Cross-encoder reranker using FlashRank (ONNX, no PyTorch)."""
+    """Cross-encoder reranker using sentence-transformers."""
 
     def __init__(
         self,
@@ -43,30 +43,30 @@ class Reranker:
         self.batch_size = batch_size
         self.enabled = enabled
         self.lazy_load = lazy_load
-        self.model_name = _normalize_flashrank_model_name(model_name)
-        self.cache_dir = os.getenv("FLASHRANK_CACHE_DIR", "/tmp/flashrank_cache")
-        self.ranker: Optional[Ranker] = None
+        self.model_name = _normalize_hf_model_name(model_name)
+        self.device = device
+        self.ranker: Optional[CrossEncoder] = None
 
         if not self.enabled:
-            log.info("FlashRank reranker disabled via configuration.")
+            log.info("CrossEncoder reranker disabled via configuration.")
             return
 
         if self.lazy_load:
             log.info(
-                f"FlashRank reranker enabled (lazy load): {self.model_name}"
+                f"CrossEncoder reranker enabled (lazy load): {self.model_name}"
             )
             return
 
         self._ensure_ranker_loaded()
 
     def _ensure_ranker_loaded(self):
-        """Load the FlashRank model once, on-demand."""
+        """Load the CrossEncoder model once, on-demand."""
         if not self.enabled or self.ranker is not None:
             return
 
-        log.info(f"Loading FlashRank reranker model: {self.model_name}")
-        self.ranker = Ranker(model_name=self.model_name, cache_dir=self.cache_dir)
-        log.info("FlashRank reranker model loaded.")
+        log.info(f"Loading CrossEncoder reranker model: {self.model_name}")
+        self.ranker = CrossEncoder(self.model_name, device=self.device)
+        log.info("CrossEncoder reranker model loaded.")
 
     def rerank(
         self,
@@ -77,7 +77,7 @@ class Reranker:
         rerank_text_mode: str = "default",
     ) -> list[dict]:
         """
-        Rerank passages by cross-encoder score via FlashRank.
+        Rerank passages by cross-encoder score.
 
         Args:
             query: Search query string.
@@ -102,7 +102,7 @@ class Reranker:
         try:
             self._ensure_ranker_loaded()
         except Exception as e:
-            log.warning(f"Failed to load FlashRank model ({self.model_name}): {e}")
+            log.warning(f"Failed to load CrossEncoder model ({self.model_name}): {e}")
             for p in passages:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
@@ -112,35 +112,32 @@ class Reranker:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
-        # Pass more candidates through the reranker than requested,
-        # so it has room to discover truly relevant passages
+        # Pass more candidates through the reranker than requested
         rerank_pool_size = min(len(passages), top_n * 3)
         rerank_pool = passages[:rerank_pool_size]
 
-        # Build text for reranking
-        flashrank_passages = []
-        for i, p in enumerate(rerank_pool):
+        # Build [query, text] pairs for cross-encoder
+        pairs = []
+        for p in rerank_pool:
             if rerank_text_mode == "combined":
                 title = p.get("metadata", {}).get("title", "") or p.get("title", "")
                 text = p.get(text_key, "")
                 combined = f"{title} — {text}" if title else text
-                flashrank_passages.append({"id": i, "text": combined})
+                pairs.append([query, combined])
             else:
-                flashrank_passages.append({"id": i, "text": p.get(text_key, "")})
+                pairs.append([query, p.get(text_key, "")])
 
-        rerank_request = RerankRequest(query=query, passages=flashrank_passages)
         try:
-            results = self.ranker.rerank(rerank_request)
+            scores = self.ranker.predict(pairs, batch_size=self.batch_size)
         except Exception as e:
-            log.warning(f"FlashRank rerank failed; using fusion order fallback: {e}")
+            log.warning(f"CrossEncoder rerank predict failed; using fusion order fallback: {e}")
             for p in passages:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
         # Map scores back to the rerank pool
-        score_map = {r["id"]: r["score"] for r in results}
         for i, p in enumerate(rerank_pool):
-            p["rerank_score"] = float(score_map.get(i, 0.0))
+            p["rerank_score"] = float(scores[i])
 
         # Sort pool by reranker score and return top_n
         reranked = sorted(rerank_pool, key=lambda x: x["rerank_score"], reverse=True)

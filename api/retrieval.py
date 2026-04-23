@@ -260,6 +260,49 @@ class HybridRetriever:
             return conditions[0]
         return {"$and": conditions}
 
+    def _semantic_pruning(self, query: str, candidates: list[dict]) -> list[dict]:
+        """
+        Prune candidates that don't look like explanatory/technical content.
+        Uses section hints and high-signal 'method' keywords.
+        """
+        if not candidates:
+            return []
+
+        high_signal_keywords = {
+            "we propose", "method", "pipeline", "architecture", "algorithm",
+            "training", "approach", "framework", "optimization", "procedure",
+            "step 1", "first,", "second,", "finally", "evaluation", "results"
+        }
+
+        pruned = []
+        for c in candidates:
+            text_lower = c.get("chunk_text", "").lower()
+            metadata = c.get("metadata", {})
+            section_hint = metadata.get("section_hint", "other")
+
+            # Score the chunk's 'explanatory signal'
+            signal_score = 0
+            
+            # Boost if it came from a high-signal section
+            if section_hint in ["method", "abstract", "intro"]:
+                signal_score += 2
+            
+            # Boost if it contains explanatory structural keywords
+            if any(kw in text_lower for kw in high_signal_keywords):
+                signal_score += 3
+            
+            # Always keep foundational ArXiv API results
+            if "arxiv_api" in c.get("chunk_id", ""):
+                signal_score += 5
+
+            # If it has some signal or is in the absolute top 3, keep it
+            if signal_score >= 2:
+                pruned.append(c)
+            elif len(pruned) < 3: # Always keep at least 3 for reranking
+                pruned.append(c)
+
+        return pruned
+
     def _filter_by_year(self, candidates: list[dict], start_year: Optional[int] = None) -> list[dict]:
         """Post-filter candidates by publication year using SQLite metadata."""
         if not start_year:
@@ -746,6 +789,11 @@ class HybridRetriever:
         # Step 3.6: Filter by year (post-filter)
         if start_year:
             merged = self._filter_by_year(merged, start_year=start_year)
+
+        # Step 3.6.5: Semantic Pruning — NEW
+        # For explanatory queries, prune chunks that don't look like explanations/methods
+        if is_explanatory:
+            merged = self._semantic_pruning(query, merged)
 
         # Step 3.7: ArXiv API Fallback — intent-aware
         best_score = merged[0].get("fusion_score", 0) if merged else 0
