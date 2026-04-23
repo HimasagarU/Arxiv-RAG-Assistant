@@ -1165,6 +1165,19 @@
                 latencyHtml += `<div class="latency-chip" style="background: var(--warning-bg); border-color: rgba(200, 140, 40, 0.2); color: var(--warning); font-weight: 600;">📚 Global ArXiv Search</div>`;
             }
 
+            // Show detected query intent
+            if (event.intent) {
+                const intentColors = {
+                    explanatory: { bg: 'rgba(79, 70, 229, 0.08)', border: 'rgba(79, 70, 229, 0.2)', color: '#4f46e5', icon: '📖' },
+                    comparative: { bg: 'rgba(217, 119, 6, 0.08)', border: 'rgba(217, 119, 6, 0.2)', color: '#b45309', icon: '⚖️' },
+                    sota: { bg: 'rgba(16, 185, 129, 0.08)', border: 'rgba(16, 185, 129, 0.2)', color: '#059669', icon: '🚀' },
+                    technical: { bg: 'rgba(139, 92, 246, 0.08)', border: 'rgba(139, 92, 246, 0.2)', color: '#7c3aed', icon: '🔬' },
+                    discovery: { bg: 'var(--accent-bg)', border: 'rgba(139, 26, 26, 0.2)', color: 'var(--accent)', icon: '🔍' },
+                };
+                const ic = intentColors[event.intent] || intentColors.discovery;
+                latencyHtml += `<div class="latency-chip" style="background: ${ic.bg}; border-color: ${ic.border}; color: ${ic.color}; font-weight: 600;">${ic.icon} ${event.intent}</div>`;
+            }
+
             latencyBar.innerHTML = latencyHtml;
 
             // Analytics

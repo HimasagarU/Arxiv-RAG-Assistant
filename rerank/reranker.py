@@ -34,7 +34,7 @@ class Reranker:
 
     def __init__(
         self,
-        model_name: str = "ms-marco-MiniLM-L-6-v2",
+        model_name: str = "ms-marco-MiniLM-L-12-v2",
         device: Optional[str] = None,
         batch_size: int = 32,
         lazy_load: bool = True,
@@ -74,6 +74,7 @@ class Reranker:
         passages: list[dict],
         top_n: int = 5,
         text_key: str = "chunk_text",
+        rerank_text_mode: str = "default",
     ) -> list[dict]:
         """
         Rerank passages by cross-encoder score via FlashRank.
@@ -83,6 +84,9 @@ class Reranker:
             passages: List of dicts, each with at least `text_key` field.
             top_n: Number of top results to return.
             text_key: Key in passage dict containing the text.
+            rerank_text_mode: "default" uses chunk_text only.
+                              "combined" uses "title — chunk_text" for richer signal
+                              (better for explanatory queries).
 
         Returns:
             Top-N passages sorted by reranker score, with 'rerank_score' added.
@@ -108,13 +112,21 @@ class Reranker:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
-        # FlashRank expects passages as list of dicts with "id" and "text" keys
+        # Pass more candidates through the reranker than requested,
+        # so it has room to discover truly relevant passages
+        rerank_pool_size = min(len(passages), top_n * 3)
+        rerank_pool = passages[:rerank_pool_size]
+
+        # Build text for reranking
         flashrank_passages = []
-        for i, p in enumerate(passages):
-            flashrank_passages.append({
-                "id": i,
-                "text": p.get(text_key, ""),
-            })
+        for i, p in enumerate(rerank_pool):
+            if rerank_text_mode == "combined":
+                title = p.get("metadata", {}).get("title", "") or p.get("title", "")
+                text = p.get(text_key, "")
+                combined = f"{title} — {text}" if title else text
+                flashrank_passages.append({"id": i, "text": combined})
+            else:
+                flashrank_passages.append({"id": i, "text": p.get(text_key, "")})
 
         rerank_request = RerankRequest(query=query, passages=flashrank_passages)
         try:
@@ -125,10 +137,11 @@ class Reranker:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
-        # Map scores back to original passages
+        # Map scores back to the rerank pool
         score_map = {r["id"]: r["score"] for r in results}
-        for i, p in enumerate(passages):
+        for i, p in enumerate(rerank_pool):
             p["rerank_score"] = float(score_map.get(i, 0.0))
 
-        reranked = sorted(passages, key=lambda x: x["rerank_score"], reverse=True)
+        # Sort pool by reranker score and return top_n
+        reranked = sorted(rerank_pool, key=lambda x: x["rerank_score"], reverse=True)
         return reranked[:top_n]

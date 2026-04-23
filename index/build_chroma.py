@@ -124,6 +124,9 @@ def build_chroma_index(
                 "categories": c["categories"],
                 "chunk_index": c["chunk_index"],
                 "token_count": c["token_count"],
+                "chunk_source": c.get("chunk_source", "abstract"),
+                "section_hint": c.get("section_hint", "other"),
+                "total_chunks": c.get("total_chunks", 1),
             }
             for c in chunks[start:end]
         ]

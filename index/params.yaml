@@ -27,7 +27,7 @@ retrieval:
 
 # --- Reranker ---
 reranker:
-  model: "cross-encoder/ms-marco-MiniLM-L-6-v2"
+  model: "ms-marco-MiniLM-L-12-v2"
   batch_size: 32
   device: "cuda"
 

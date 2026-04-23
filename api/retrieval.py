@@ -72,6 +72,44 @@ def tokenize_bm25(text: str) -> list[str]:
     return [t for t in tokens if t not in STOPWORDS]
 
 
+# ---------------------------------------------------------------------------
+# Query Intent Classification
+# ---------------------------------------------------------------------------
+
+# Intent types
+INTENT_EXPLANATORY = "explanatory"   # "what is X", "how does X work"
+INTENT_SOTA = "sota"                 # "latest X", "state of the art"
+INTENT_COMPARATIVE = "comparative"   # "compare X and Y", "X vs Y"
+INTENT_TECHNICAL = "technical"       # "derive X", "formal definition"
+INTENT_DISCOVERY = "discovery"       # everything else
+
+_INTENT_RULES = [
+    # (regex_pattern, intent)
+    (re.compile(r"\b(what\s+is|what\s+are|how\s+does|how\s+do|explain|define|describe|overview\s+of|introduction\s+to|basics\s+of|concept\s+of|meaning\s+of|tell\s+me\s+about)\b", re.I), INTENT_EXPLANATORY),
+    (re.compile(r"\b(compare|vs\.?|versus|difference\s+between|compared\s+to|similarities|pros\s+and\s+cons|advantages\s+over|trade.?offs?)\b", re.I), INTENT_COMPARATIVE),
+    (re.compile(r"\b(latest|newest|recent|state.of.the.art|sota|cutting.edge|current\s+trends?|advances?\s+in|progress\s+in|2024|2025|2026)\b", re.I), INTENT_SOTA),
+    (re.compile(r"\b(derive|proof|prove|formal\s+definition|theorem|lemma|mathematical|equation\s+for|algorithm\s+for|pseudocode)\b", re.I), INTENT_TECHNICAL),
+]
+
+
+def classify_query_intent(query: str) -> str:
+    """
+    Classify query intent using keyword/regex rules.
+    Returns one of: explanatory, sota, comparative, technical, discovery.
+    """
+    query_stripped = query.strip()
+
+    for pattern, intent in _INTENT_RULES:
+        if pattern.search(query_stripped):
+            return intent
+
+    # Heuristic: short queries ending with '?' are often explanatory
+    if query_stripped.endswith('?') and len(query_stripped.split()) <= 8:
+        return INTENT_EXPLANATORY
+
+    return INTENT_DISCOVERY
+
+
 def _env_flag(name: str, default: bool) -> bool:
     """Parse boolean-like environment flags with a safe default."""
     raw = os.getenv(name)
@@ -563,67 +601,78 @@ class HybridRetriever:
     # ------------------------------------------------------------------
 
     def compress_context(self, query: str, passages: list[dict],
-                         max_sentences: int = 10) -> str:
+                         max_sentences: int = 25,
+                         intent: str = INTENT_DISCOVERY) -> str:
         """
-        Compress retrieved passages into a compact context using
-        Maximal Marginal Relevance (MMR) sentence selection.
+        Compress retrieved passages into a compact context.
+
+        For explanatory queries: skip MMR sentence-shredding and use full
+        passages (preserves paragraph coherence for step-by-step explanations).
+
+        For other intents: use MMR-based sentence selection to maximize
+        diversity and relevance.
         """
+        # For explanatory queries, preserve full passage structure
+        if intent == INTENT_EXPLANATORY:
+            context_parts = []
+            for i, p in enumerate(passages, 1):
+                title = p.get("title", p.get("metadata", {}).get("title", ""))
+                text = p.get("chunk_text", "")
+                if text:
+                    header = f"[Source {i}: {title}]" if title else f"[Source {i}]"
+                    context_parts.append(f"{header}\n{text}")
+            return "\n\n".join(context_parts)
+
+        # For non-explanatory queries, use MMR sentence selection
         try:
             import nltk
             try:
                 nltk.data.find('tokenizers/punkt_tab')
             except LookupError:
                 nltk.download('punkt_tab', quiet=True)
-            
-            # Split all passages into sentences
+
             all_sentences = []
             for p in passages:
                 text = p.get("chunk_text", "")
                 if text:
                     sents = nltk.sent_tokenize(text)
                     all_sentences.extend(sents)
-            
+
             if not all_sentences or len(all_sentences) <= max_sentences:
                 return " ".join(all_sentences)
-            
+
             # Encode query and sentences
             query_emb = list(self.embed_model.embed([query]))[0]
             sent_embs = np.array(list(self.embed_model.embed(all_sentences)))
-            
+
             # MMR selection
             selected_indices = []
             remaining = list(range(len(all_sentences)))
             lambda_param = 0.7
-            
+
             for _ in range(min(max_sentences, len(all_sentences))):
                 best_score = -float('inf')
                 best_idx = -1
-                
+
                 for idx in remaining:
-                    # Relevance to query
                     relevance = float(np.dot(sent_embs[idx], query_emb))
-                    
-                    # Max similarity to already selected
                     if selected_indices:
                         selected_embs = sent_embs[selected_indices]
                         max_sim = float(np.max(np.dot(selected_embs, sent_embs[idx])))
                     else:
                         max_sim = 0.0
-                    
                     mmr_score = lambda_param * relevance - (1 - lambda_param) * max_sim
-                    
                     if mmr_score > best_score:
                         best_score = mmr_score
                         best_idx = idx
-                
+
                 if best_idx >= 0:
                     selected_indices.append(best_idx)
                     remaining.remove(best_idx)
-            
-            # Return sentences in original order
+
             selected_indices.sort()
             return " ".join(all_sentences[i] for i in selected_indices)
-        
+
         except Exception as e:
             log.warning(f"Context compression failed: {e}. Using raw passages.")
             return " ".join(p.get("chunk_text", "") for p in passages)
@@ -636,10 +685,10 @@ class HybridRetriever:
                  category: Optional[str] = None,
                  author: Optional[str] = None,
                  start_year: Optional[int] = None,
-                 enable_recency_boost: bool = True) -> dict:
+                 intent: Optional[str] = None) -> dict:
         """
-        Full hybrid retrieval pipeline with optional metadata filtering
-        and recency boosting.
+        Full hybrid retrieval pipeline with optional metadata filtering,
+        intent-aware recency control, and smart ArXiv API fallback.
 
         Returns dict with:
             - passages: list of top-N passages with metadata
@@ -647,8 +696,11 @@ class HybridRetriever:
             - analytics: top authors and categories from results
         """
         top_n = top_n or self.final_top_n
-        trace = {}
+        intent = intent or classify_query_intent(query)
+        trace = {"intent": intent}
         t0 = time.time()
+
+        is_explanatory = (intent == INTENT_EXPLANATORY)
 
         # Build Chroma filter
         where_filter = self._build_chroma_where(category=category, author=author)
@@ -667,6 +719,11 @@ class HybridRetriever:
         trace["bm25_enabled"] = self.enable_bm25
 
         # Step 3: Merge and RRF fusion
+        # For explanatory queries, keep a larger candidate pool for reranking
+        orig_merge_top = self.merge_top_m
+        if is_explanatory:
+            self.merge_top_m = 30
+
         t3 = time.time()
         merged = self._merge_and_normalize(dense_candidates, bm25_candidates)
         trace["merge_ms"] = round((time.time() - t3) * 1000, 1)
@@ -674,36 +731,44 @@ class HybridRetriever:
         trace["fusion_method"] = "rrf"
         trace["rrf_k"] = self.rrf_k
 
-        # Step 3.5: Apply recency boost
-        if enable_recency_boost:
+        # Restore original merge_top_m
+        self.merge_top_m = orig_merge_top
+
+        # Step 3.5: Apply recency boost — DISABLED for explanatory queries
+        # For explanatory queries, canonical/foundational papers matter more
+        if not is_explanatory:
             merged = self._apply_recency_boost(merged)
             merged.sort(key=lambda x: x["fusion_score"], reverse=True)
+            trace["recency_boost"] = True
+        else:
+            trace["recency_boost"] = False
 
         # Step 3.6: Filter by year (post-filter)
         if start_year:
             merged = self._filter_by_year(merged, start_year=start_year)
 
-        # Step 3.7: Relevance check & ArXiv API Fallback (Foundational Gap Fix)
-        # If best local score is low, fetch foundational abstracts from official API
+        # Step 3.7: ArXiv API Fallback — intent-aware
         best_score = merged[0].get("fusion_score", 0) if merged else 0
         trace["local_relevance"] = round(float(best_score), 4)
-        
-        if best_score < 0.05:
+
+        if best_score < 0.05 or (is_explanatory and best_score < 0.08):
             trace["arxiv_api_fallback"] = True
-            foundational = self._fetch_foundational_papers(query, top_n=2)
+            foundational = self._fetch_foundational_papers(query, top_n=3, intent=intent)
             if foundational:
-                # Add to context
                 merged.extend(foundational)
-                # Re-sort just to be sure, though foundational has 0.05
                 merged.sort(key=lambda x: x.get("fusion_score", 0), reverse=True)
         else:
             trace["arxiv_api_fallback"] = False
 
-        # Step 4: Cross-encoder reranking
+        # Step 4: Cross-encoder reranking — intent-aware text mode
         t4 = time.time()
+        rerank_mode = "combined" if is_explanatory else "default"
         try:
-            reranked = self.reranker.rerank(query, merged, top_n=top_n)
+            reranked = self.reranker.rerank(
+                query, merged, top_n=top_n, rerank_text_mode=rerank_mode
+            )
             trace["rerank_fallback"] = False
+            trace["rerank_text_mode"] = rerank_mode
         except Exception as e:
             log.warning(f"Reranking failed; using fusion ranking fallback: {e}")
             reranked = merged[:top_n]
@@ -736,7 +801,7 @@ class HybridRetriever:
             "category": category,
             "author": author,
             "start_year": start_year,
-            "recency_boost": enable_recency_boost,
+            "recency_boost": trace.get("recency_boost", True),
         }
 
         return {
@@ -745,35 +810,46 @@ class HybridRetriever:
             "analytics": analytics,
         }
 
-    def _fetch_foundational_papers(self, query: str, top_n: int = 3) -> list[dict]:
+    def _fetch_foundational_papers(self, query: str, top_n: int = 3,
+                                    intent: str = INTENT_DISCOVERY) -> list[dict]:
         """
         Fetch foundational paper abstracts directly from the ArXiv API.
-        Useful when local SOTA-focused index lacks foundational context.
+        Intent-aware: for explanatory queries, search for surveys/tutorials.
         """
         try:
-            log.info(f"Triggering ArXiv API fallback for foundational papers: '{query}'")
-            # Search ArXiv for the query, sorted by relevance (often foundational papers rank high)
-            encoded_query = urllib.parse.quote(query)
-            # We search for the query in all fields, limited to top_n
-            url = f"http://export.arxiv.org/api/query?search_query=all:{encoded_query}&start=0&max_results={top_n}&sortBy=relevance&sortOrder=descending"
-            
-            with urllib.request.urlopen(url, timeout=5) as resp:
+            log.info(f"ArXiv API fallback (intent={intent}): '{query}'")
+
+            # For explanatory queries, append survey/tutorial terms
+            search_query = query
+            if intent == INTENT_EXPLANATORY:
+                search_query = f"{query} survey OR tutorial OR overview"
+
+            encoded_query = urllib.parse.quote(search_query)
+            url = (
+                f"http://export.arxiv.org/api/query?"
+                f"search_query=all:{encoded_query}&start=0"
+                f"&max_results={top_n}&sortBy=relevance&sortOrder=descending"
+            )
+
+            with urllib.request.urlopen(url, timeout=8) as resp:
                 feed = feedparser.parse(resp.read())
-            
+
             foundational = []
             for entry in feed.entries:
                 paper_id = entry.id.split('/abs/')[-1].split('v')[0]
+                title = entry.title.replace('\n', ' ').strip()
+                abstract = entry.summary.replace('\n', ' ').strip()
                 foundational.append({
                     "chunk_id": f"arxiv_api_{paper_id}",
-                    "chunk_text": f"[Foundational Abstract] {entry.summary}",
+                    "chunk_text": f"{title}. {abstract}",
                     "metadata": {
                         "paper_id": paper_id,
-                        "title": entry.title.replace('\n', ' '),
+                        "title": title,
                         "authors": ", ".join(a.name for a in entry.authors),
                         "categories": ", ".join(t.term for t in entry.tags),
                     },
-                    "fusion_score": 0.05, # Give it a "relevant-enough" score to stay in context
-                    "rerank_score": 0.05,
+                    "fusion_score": 0.08,
+                    "rerank_score": 0.08,
                     "sources": ["arxiv_api"],
                 })
             return foundational

@@ -220,56 +220,153 @@ if _frontend_dir.is_dir():
 
 
 # ---------------------------------------------------------------------------
-# Prompt builder
+# Prompt builder — intent-aware templates
 # ---------------------------------------------------------------------------
 
-def build_prompt(query: str, compressed_context: str, passages: list[dict]) -> str:
-    """Build a RAG prompt using Feynman technique with numbered citations."""
-    # Build numbered source list for the model to reference
-    sources_block = ""
+def _build_sources_block(passages: list[dict]) -> str:
+    """Build numbered source list for the model to reference."""
+    lines = []
     for i, p in enumerate(passages, 1):
         title = p.get('title', 'Untitled')
-        sources_block += f"[{i}] \"{title}\"\n"
+        lines.append(f'[{i}] "{title}"')
+    return "\n".join(lines)
 
-    prompt = f"""You are an expert AI/ML research assistant. Your goal is to give a thorough,
-well-structured answer that a smart graduate student would find genuinely useful.
 
-INSTRUCTIONS:
-1. Read ALL provided source passages carefully before answering.
-2. Use the Feynman Technique: explain concepts clearly so a knowledgeable non-specialist
-   can follow. Avoid jargon without explanation.
-3. Think step-by-step about what the question is really asking, then synthesize.
-4. Use numbered citations like [1], [2] to reference sources.
-   NEVER write "Source: chunk_id" or mention chunk IDs.
-5. If information is insufficient, say so honestly rather than speculating.
+def build_prompt(query: str, compressed_context: str, passages: list[dict],
+                 intent: str = "discovery") -> str:
+    """Build a RAG prompt with intent-specific answer templates."""
+    sources_block = _build_sources_block(passages)
 
-FORMAT YOUR ANSWER EXACTLY LIKE THIS:
-1. **Technical Fact Audit**: List the 3-5 most important technical facts/data points found in the sources.
-2. **Analysis**: Synthesize the answer using those facts.
-3. **Executive Summary**: A **bold 1-2 sentence executive summary**.
-4. **References**: Numbered source titles.
+    if intent == "explanatory":
+        return _build_explanatory_prompt(query, compressed_context, sources_block)
+    elif intent == "comparative":
+        return _build_comparative_prompt(query, compressed_context, sources_block)
+    else:
+        return _build_general_prompt(query, compressed_context, sources_block)
 
-Strict Rules:
-- Prioritize technical nuance and precision over simplicity.
-- Use the Feynman Technique for CLARITY, but do not omit complex details.
-- The very first section MUST be the Technical Fact Audit.
-- Wrap the Executive Summary in double asterisks **like this**.
+
+def _build_explanatory_prompt(query: str, context: str, sources: str) -> str:
+    return f"""You are an expert AI/ML research assistant. A student has asked an explanatory question.
+Your job is to give a clear, accurate, step-by-step explanation grounded in the source passages.
+
+CRITICAL RULES:
+1. Every key claim must be supported by at least one source. Use citations [1], [2], etc.
+2. If the sources lack evidence for a key part of the explanation, say "the provided sources do not cover this step" rather than guessing.
+3. Do NOT write a literature review. Write a direct explanation of the mechanism/concept.
+4. Use the Feynman Technique: be clear, but do NOT omit important technical details.
+
+STRUCTURE YOUR ANSWER EXACTLY LIKE THIS:
+1. **Definition**: A clear 1-2 sentence definition of the concept. Start with double asterisks **like this**.
+2. **How It Works**: A step-by-step explanation of the mechanism or pipeline. Number each step.
+3. **Why It Works**: Explain the intuition behind why this approach is effective.
+4. **Limitations**: Briefly note known limitations or failure modes.
+5. **References**: List the numbered source titles.
 
 ---
 
 SOURCE PASSAGES:
-{compressed_context}
+{context}
 
 AVAILABLE SOURCES:
-{sources_block}
+{sources}
 
 QUESTION: {query}
 
 ANSWER:"""
-    return prompt
 
 
-def generate_answer(prompt: str) -> str:
+def _build_comparative_prompt(query: str, context: str, sources: str) -> str:
+    return f"""You are an expert AI/ML research assistant. A student wants to compare two or more approaches.
+Your job is to give a balanced, evidence-based comparison grounded in the source passages.
+
+CRITICAL RULES:
+1. Every claim must be supported by at least one source. Use citations [1], [2], etc.
+2. Be fair and balanced — present strengths and weaknesses of each side.
+3. Do NOT fabricate benchmark numbers. Only cite numbers found in the sources.
+
+STRUCTURE YOUR ANSWER EXACTLY LIKE THIS:
+1. **Overview**: A 1-2 sentence summary of what is being compared. Start with double asterisks **like this**.
+2. **Approach A**: Summary of the first approach — key mechanism, strengths.
+3. **Approach B**: Summary of the second approach — key mechanism, strengths.
+4. **Key Differences**: A clear comparison of the main differences (use a list).
+5. **When to Use Each**: Practical guidance on when each approach is more appropriate.
+6. **References**: List the numbered source titles.
+
+---
+
+SOURCE PASSAGES:
+{context}
+
+AVAILABLE SOURCES:
+{sources}
+
+QUESTION: {query}
+
+ANSWER:"""
+
+
+def _build_general_prompt(query: str, context: str, sources: str) -> str:
+    return f"""You are an expert AI/ML research assistant. Your goal is to give a thorough,
+well-structured answer that a smart graduate student would find genuinely useful.
+
+CRITICAL RULES:
+1. Read ALL provided source passages carefully before answering.
+2. Use numbered citations [1], [2] to reference sources. NEVER mention chunk IDs.
+3. Every key claim must be supported by at least one source passage.
+4. If information is insufficient, say so honestly rather than speculating.
+5. Use the Feynman Technique: explain clearly, but preserve technical precision.
+
+STRUCTURE YOUR ANSWER LIKE THIS:
+1. **Summary**: A bold 1-2 sentence executive summary answering the core question. Start with double asterisks **like this**.
+2. **Key Findings**: The most important technical insights from the sources.
+3. **Details**: Deeper explanation with evidence from the passages.
+4. **References**: Numbered source titles.
+
+---
+
+SOURCE PASSAGES:
+{context}
+
+AVAILABLE SOURCES:
+{sources}
+
+QUESTION: {query}
+
+ANSWER:"""
+
+
+# ---------------------------------------------------------------------------
+# Intent-aware system prompts
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPTS = {
+    "explanatory": (
+        "You are an expert AI/ML research assistant. When explaining concepts, "
+        "give clear step-by-step explanations grounded in source evidence. "
+        "Start with a bold definition. Use numbered citations [1], [2]. "
+        "Never fabricate steps — if the sources don't cover something, say so."
+    ),
+    "comparative": (
+        "You are an expert AI/ML research assistant. When comparing approaches, "
+        "be balanced and evidence-based. Present both sides fairly. "
+        "Use numbered citations [1], [2]. Start with a bold overview."
+    ),
+    "default": (
+        "You are an expert AI/ML research assistant. Give thorough, well-structured answers "
+        "using the Feynman Technique. Use numbered citations [1], [2] to reference sources. "
+        "Start with a bold executive summary. Ground every claim in the source passages."
+    ),
+}
+
+
+def get_system_prompt(intent: str = "discovery") -> str:
+    """Get the system prompt for a given intent."""
+    if intent in _SYSTEM_PROMPTS:
+        return _SYSTEM_PROMPTS[intent]
+    return _SYSTEM_PROMPTS["default"]
+
+
+def generate_answer(prompt: str, intent: str = "discovery") -> str:
     """
     Generate an answer using Groq API (free tier, ultra-fast inference).
     Falls back to local extractive summary if GROQ_API_KEY is not set.
@@ -277,33 +374,29 @@ def generate_answer(prompt: str) -> str:
     groq_api_key = os.getenv("GROQ_API_KEY")
 
     if groq_api_key:
-        return _generate_groq(prompt, groq_api_key)
+        return _generate_groq(prompt, groq_api_key, intent=intent)
     else:
         log.warning("GROQ_API_KEY not set — using local extractive summary.")
         return _generate_local_fallback(prompt)
 
 
-GROQ_SYSTEM_PROMPT = (
-    "You are an expert AI/ML research assistant. Give thorough, well-structured answers "
-    "using the Feynman Technique. Use numbered citations [1], [2] etc. to reference sources. "
-    "CRITICAL: Always start with a 1-2 sentence executive summary wrapped in double asterisks **like this**."
-)
-
-
-def _generate_groq(prompt: str, api_key: str) -> str:
+def _generate_groq(prompt: str, api_key: str, intent: str = "discovery") -> str:
     """Generate answer using Groq API with Llama 3.3 70B."""
     try:
         from groq import Groq
 
         client = Groq(api_key=api_key)
+        system_prompt = get_system_prompt(intent)
+        # Lower temperature for explanatory queries (more focused)
+        temp = 0.1 if intent == "explanatory" else 0.2
 
         chat_completion = client.chat.completions.create(
             messages=[
-                {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
             model="llama-3.3-70b-versatile",
-            temperature=0.2,
+            temperature=temp,
             max_tokens=2048,
             top_p=0.9,
         )
@@ -315,19 +408,21 @@ def _generate_groq(prompt: str, api_key: str) -> str:
         return f"[Groq API error: {e}] — Falling back to source extraction.\n\n" + _generate_local_fallback(prompt)
 
 
-def _generate_groq_stream(prompt: str, api_key: str):
+def _generate_groq_stream(prompt: str, api_key: str, intent: str = "discovery"):
     """Streaming generator: yields answer tokens one-by-one from Groq."""
     from groq import Groq
 
     client = Groq(api_key=api_key)
+    system_prompt = get_system_prompt(intent)
+    temp = 0.1 if intent == "explanatory" else 0.2
 
     stream = client.chat.completions.create(
         messages=[
-            {"role": "system", "content": GROQ_SYSTEM_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         model="llama-3.3-70b-versatile",
-        temperature=0.2,
+        temperature=temp,
         max_tokens=2048,
         top_p=0.9,
         stream=True,
@@ -432,27 +527,34 @@ async def query_endpoint(request: QueryRequest):
     t0 = time.time()
     _state["query_count"] += 1
 
-    # Retrieve with filters
+    # Classify query intent (drives retrieval, compression, and prompt selection)
+    from api.retrieval import classify_query_intent
+    intent = classify_query_intent(request.query)
+
+    # Retrieve with filters + intent
     result = _state["retriever"].retrieve(
         request.query,
         top_n=request.top_k,
         category=request.category,
         author=request.author,
         start_year=request.start_year,
+        intent=intent,
     )
     passages = result["passages"]
     trace = result["trace"]
     analytics = result.get("analytics", {})
 
-    # Context compression via MMR (Increased budget for better accuracy)
+    # Context compression — intent-aware
     t_compress = time.time()
-    compressed_context = _state["retriever"].compress_context(request.query, passages, max_sentences=40)
+    compressed_context = _state["retriever"].compress_context(
+        request.query, passages, intent=intent
+    )
     trace["compress_ms"] = round((time.time() - t_compress) * 1000, 1)
 
-    # Generate answer using compressed context
+    # Generate answer — intent-aware prompt and temperature
     t_gen = time.time()
-    prompt = build_prompt(request.query, compressed_context, passages)
-    answer = generate_answer(prompt)
+    prompt = build_prompt(request.query, compressed_context, passages, intent=intent)
+    answer = generate_answer(prompt, intent=intent)
     trace["generation_ms"] = round((time.time() - t_gen) * 1000, 1)
 
     total_ms = round((time.time() - t0) * 1000, 1)
@@ -525,23 +627,30 @@ async def query_stream_endpoint(request: QueryRequest):
     t0 = time.time()
     _state["query_count"] += 1
 
-    # Retrieve with filters
+    # Classify query intent
+    from api.retrieval import classify_query_intent
+    intent = classify_query_intent(request.query)
+
+    # Retrieve with filters + intent
     result = _state["retriever"].retrieve(
         request.query,
         top_n=request.top_k,
         category=request.category,
         author=request.author,
         start_year=request.start_year,
+        intent=intent,
     )
     passages = result["passages"]
     trace = result["trace"]
     analytics = result.get("analytics", {})
 
-    # Context compression (Increased budget for better accuracy)
-    compressed_context = _state["retriever"].compress_context(request.query, passages, max_sentences=40)
+    # Context compression — intent-aware
+    compressed_context = _state["retriever"].compress_context(
+        request.query, passages, intent=intent
+    )
 
-    # Build prompt
-    prompt = build_prompt(request.query, compressed_context, passages)
+    # Build intent-aware prompt
+    prompt = build_prompt(request.query, compressed_context, passages, intent=intent)
 
     # Build sources list
     sources = [
@@ -561,20 +670,20 @@ async def query_stream_endpoint(request: QueryRequest):
 
     def event_generator():
         """SSE generator: metadata event, then token events, then DONE."""
-        # First event: metadata (sources, trace, analytics)
         meta_payload = json.dumps({
             "type": "metadata",
             "sources": sources,
             "retrieval_trace": trace,
             "analytics": analytics,
             "retrieval_ms": retrieval_ms,
-            "arxiv_api_fallback": trace.get("arxiv_api_fallback", False)
+            "arxiv_api_fallback": trace.get("arxiv_api_fallback", False),
+            "intent": intent,
         })
         yield f"data: {meta_payload}\n\n"
 
-        # Stream answer tokens
+        # Stream answer tokens — intent-aware
         try:
-            for token in _generate_groq_stream(prompt, groq_api_key):
+            for token in _generate_groq_stream(prompt, groq_api_key, intent=intent):
                 token_payload = json.dumps({"type": "token", "content": token})
                 yield f"data: {token_payload}\n\n"
         except Exception as e:
