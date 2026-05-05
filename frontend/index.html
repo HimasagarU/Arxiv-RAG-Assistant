@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ArXiv Research Assistant — AI &amp; ML Paper Search</title>
-    <meta name="description" content="AI-powered research assistant for ArXiv papers using hybrid RAG retrieval with semantic search, PostgreSQL FTS, and cross-encoder reranking.">
+    <title>ArXiv Research Assistant — Mechanistic Interpretability</title>
+    <meta name="description" content="AI-powered research assistant for mechanistic interpretability papers. Hybrid RAG retrieval with Qdrant dense search, PostgreSQL FTS, and cross-encoder reranking.">
     <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         /* ============================================ */
@@ -747,8 +747,8 @@
         <main class="main">
             <!-- Hero -->
             <section class="hero">
-                <h1>Search AI &amp; ML Research</h1>
-                <p>Ask questions about the latest research papers. Powered by hybrid semantic + keyword retrieval with cross-encoder reranking.</p>
+                <h1>Mechanistic Interpretability Research</h1>
+                <p>Ask questions about transformer circuits, sparse autoencoders, activation patching, and more. Powered by hybrid dense + FTS retrieval with cross-encoder reranking.</p>
             </section>
 
             <!-- Search -->
@@ -759,7 +759,7 @@
                             type="text"
                             class="search-input"
                             id="queryInput"
-                            placeholder="e.g. What are the latest advances in vision transformers?"
+                            placeholder="e.g. How do sparse autoencoders find interpretable features?"
                             autocomplete="off"
                         />
                         <button class="search-btn" id="searchBtn" onclick="submitQuery()">
@@ -777,18 +777,6 @@
                             </select>
                         </div>
                         <div class="filter-group">
-                            <label>Category:</label>
-                            <select id="filterCategory">
-                                <option value="">All</option>
-                                <option value="cs.AI">cs.AI</option>
-                                <option value="cs.LG">cs.LG</option>
-                                <option value="cs.CV">cs.CV</option>
-                                <option value="cs.CL">cs.CL</option>
-                                <option value="cs.NE">cs.NE</option>
-                                <option value="stat.ML">stat.ML</option>
-                            </select>
-                        </div>
-                        <div class="filter-group">
                             <label>From Year:</label>
                             <input type="number" id="filterYear" placeholder="e.g. 2023" min="2000" max="2030" />
                         </div>
@@ -802,12 +790,12 @@
 
             <!-- Sample Queries -->
             <section class="sample-queries" id="sampleQueries">
-                <div class="sample-query" onclick="useSample(this)">What are transformer architectures?</div>
-                <div class="sample-query" onclick="useSample(this)">How does RLHF work?</div>
-                <div class="sample-query" onclick="useSample(this)">Explain diffusion models</div>
-                <div class="sample-query" onclick="useSample(this)">Vision transformers vs CNNs</div>
-                <div class="sample-query" onclick="useSample(this)">Mixture of experts models</div>
-                <div class="sample-query" onclick="useSample(this)">Knowledge distillation techniques</div>
+                <div class="sample-query" onclick="useSample(this)">What are induction heads?</div>
+                <div class="sample-query" onclick="useSample(this)">How does activation patching work?</div>
+                <div class="sample-query" onclick="useSample(this)">Explain sparse autoencoders for interpretability</div>
+                <div class="sample-query" onclick="useSample(this)">What is superposition in neural networks?</div>
+                <div class="sample-query" onclick="useSample(this)">Circuit discovery vs probing classifiers</div>
+                <div class="sample-query" onclick="useSample(this)">Latest advances in mechanistic interpretability</div>
             </section>
 
             <!-- Error -->
@@ -816,7 +804,7 @@
             <!-- Loading -->
             <div class="loading-overlay" id="loadingOverlay">
                 <div class="loading-spinner"></div>
-                <div class="loading-text">Searching ArXiv papers…</div>
+                <div class="loading-text">Searching mechanistic interpretability papers…</div>
                 <div class="loading-steps">
                     <div class="loading-step active" id="stepDense">⟳ Dense retrieval (semantic search)</div>
                     <div class="loading-step" id="stepFTS">○ FTS retrieval (keyword match)</div>
@@ -875,7 +863,6 @@
         const queryInput = document.getElementById('queryInput');
         const searchBtn = document.getElementById('searchBtn');
         const topKSelect = document.getElementById('topK');
-        const filterCategory = document.getElementById('filterCategory');
         const filterYear = document.getElementById('filterYear');
         const filterAuthor = document.getElementById('filterAuthor');
         const loadingOverlay = document.getElementById('loadingOverlay');
@@ -899,7 +886,9 @@
             try {
                 const resp = await fetch(`${API_BASE}/health`);
                 const data = await resp.json();
-                statusText.textContent = `${data.chroma_docs.toLocaleString()} docs · ${data.db_papers.toLocaleString()} papers`;
+                const collections = data.collections || {};
+                const textCount = collections['arxiv_text'] || 0;
+                statusText.textContent = `${textCount.toLocaleString()} chunks · ${data.db_papers.toLocaleString()} papers`;
                 statusBadge.style.borderColor = 'rgba(45, 106, 79, 0.2)';
             } catch (e) {
                 statusText.textContent = 'API Offline';
@@ -932,7 +921,7 @@
             currentAbortController = new AbortController();
 
             const topK = parseInt(topKSelect.value);
-            const category = filterCategory.value || null;
+            const category = null;
             const startYear = filterYear.value ? parseInt(filterYear.value) : null;
             const author = filterAuthor.value.trim() || null;
 
@@ -1239,14 +1228,6 @@
         function renderAnalytics(analytics, sourceCount) {
             let analyticsHtml = '';
 
-            if (analytics.top_categories && analytics.top_categories.length > 0) {
-                analyticsHtml += `<div class="analytics-card">
-                    <h4>Top Categories</h4>
-                    <ul class="analytics-list">
-                        ${analytics.top_categories.map(c => `<li><span>${escapeHtml(c.name)}</span><span class="count">${c.count}</span></li>`).join('')}
-                    </ul>
-                </div>`;
-            }
 
             if (analytics.top_authors && analytics.top_authors.length > 0) {
                 analyticsHtml += `<div class="analytics-card">
@@ -1273,9 +1254,15 @@
             sourcesCount.textContent = `${sources.length} Sources Retrieved`;
 
             sourcesList.innerHTML = sources.map((s, i) => {
-                const categories = (s.categories || '').split(',').filter(c => c.trim()).slice(0, 4);
+                const layer = s.layer || 'core';
+                const layerColors = {
+                    prerequisite: 'background: rgba(139, 92, 246, 0.08); color: #7c3aed; border-color: rgba(139, 92, 246, 0.3);',
+                    foundation: 'background: rgba(217, 119, 6, 0.08); color: #b45309; border-color: rgba(217, 119, 6, 0.3);',
+                    core: 'background: var(--accent-bg); color: var(--accent); border-color: rgba(139, 26, 26, 0.3);',
+                    latest: 'background: rgba(16, 185, 129, 0.08); color: #059669; border-color: rgba(16, 185, 129, 0.3);',
+                };
+                const layerTag = `<span class="source-tag" style="${layerColors[layer] || layerColors.core} font-weight: 600;">${layer.toUpperCase()}</span>`;
                 const isFoundational = (s.chunk_id || '').startsWith('arxiv_api_');
-                const tags = categories.map(c => `<span class="source-tag">${c.trim()}</span>`).join('');
                 const foundationalBadge = isFoundational ? '<span class="source-tag" style="background: var(--warning-bg); color: var(--warning); border-color: rgba(200, 140, 40, 0.3); font-weight: 600;">FOUNDATIONAL</span>' : '';
                 const arxivLink = s.paper_id ? `https://arxiv.org/abs/${s.paper_id}` : '#';
 
@@ -1294,7 +1281,7 @@
                         <div class="source-text" onclick="toggleSource(document.getElementById('source-${i}'))">${escapeHtml(s.chunk_text)}</div>
                         <div class="source-footer">
                             ${foundationalBadge}
-                            ${tags}
+                            ${layerTag}
                             <button class="btn-similar" onclick="event.stopPropagation(); findSimilar('${s.paper_id}', 'source-${i}')">Similar Papers</button>
                             <a class="source-link" href="${arxivLink}" target="_blank" onclick="event.stopPropagation()">View on ArXiv →</a>
                         </div>

@@ -141,8 +141,8 @@ class TestIngestion:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(
-    not os.path.exists("data/chroma_db"),
-    reason="Indexes not built yet",
+    not os.getenv("QDRANT_URL"),
+    reason="Qdrant not configured",
 )
 class TestIntegration:
     """Integration tests (require built indexes)."""
@@ -161,7 +161,7 @@ class TestIntegration:
         assert "trace" in result
         assert len(result["passages"]) <= 3
 
-    def test_lexical_filtering_uses_chroma_metadata(self, monkeypatch):
+    def test_lexical_filtering_uses_metadata(self, monkeypatch):
         from api.retrieval import HybridRetriever
 
         retriever = HybridRetriever()
@@ -172,18 +172,17 @@ class TestIntegration:
             pytest.skip("No lexical candidates available for metadata filter test.")
 
         sample_id = base_candidates[0]["chunk_id"]
-        fetched = retriever.collection.get(ids=[sample_id], include=["metadatas"])
-        sample_metadatas = fetched.get("metadatas", [])
-        if not sample_metadatas or not sample_metadatas[0]:
-            pytest.skip("Sample candidate has no metadata in Chroma.")
+        paper_id = base_candidates[0]["metadata"]["paper_id"]
+        row = retriever.db.get_paper(paper_id)
+        if not row:
+            pytest.skip("Sample candidate paper not found in DB.")
 
-        sample_meta = sample_metadatas[0]
         sample_category = next(
-            (cat.strip() for cat in sample_meta.get("categories", "").split(",") if cat.strip()),
+            (cat.strip() for cat in row.get("categories", "").split(",") if cat.strip()),
             None,
         )
         sample_author = next(
-            (name.strip() for name in sample_meta.get("authors", "").split(",") if name.strip()),
+            (name.strip() for name in row.get("authors", "").split(",") if name.strip()),
             None,
         )
 

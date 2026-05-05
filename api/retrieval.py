@@ -113,19 +113,12 @@ class HybridRetriever:
         merge_top_m: int = 30,
         final_top_n: int = 5,
         rrf_k: int = 60,
-        # Legacy compat
-        chroma_dir: str = None,
-        alpha: Optional[float] = None,
-        beta: Optional[float] = None,
     ):
         self.k_dense = k_dense
         self.k_lex = k_lex
         self.merge_top_m = merge_top_m
         self.final_top_n = final_top_n
         self.rrf_k = int(os.getenv("RRF_K", str(rrf_k)))
-
-        if alpha is not None or beta is not None:
-            log.warning("alpha/beta fusion params are deprecated; using RRF fusion.")
 
         qdrant_url = qdrant_url or os.getenv("QDRANT_URL")
         qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")

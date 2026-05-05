@@ -42,7 +42,6 @@ chunking:
 # Embedding models
 embedding:
   text_model: "BAAI/bge-large-en-v1.5"
-  image_model: "google/siglip-base-patch16-224"
 
 # Qdrant vector database
 qdrant:
@@ -52,9 +51,6 @@ qdrant:
   search_ef: 200
   collections:
     text: "arxiv_text"
-    tables: "arxiv_tables"
-    equations: "arxiv_equations"
-    figures: "arxiv_figures"
 
 # Lexical retrieval — PostgreSQL FTS (automatic, no separate index needed)
 
@@ -66,7 +62,6 @@ retrieval:
   merge_top_m_explanatory: 40
   final_top_n: 5
   rrf_k: 60                    # Reciprocal Rank Fusion constant
-  modality_boost_factor: 1.25  # Lower boost to avoid over-indexing on modality
   max_chunks_per_paper: 2      # Paper-level diversity cap
 
 # Reranking
