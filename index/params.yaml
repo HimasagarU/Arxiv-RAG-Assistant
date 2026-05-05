@@ -1,40 +1,83 @@
-# ArXiv RAG Assistant - Default Hyperparameters
+# ArXiv RAG — Mechanistic Interpretability Pipeline Configuration
+# ================================================================
 
-# --- Chunking ---
+# Corpus strategy
+corpus:
+  query_mode: keyword       # keyword (focused) | category (legacy)
+  target_min: 500
+  target_max: 5000
+  seed_papers: 15
+  keywords:
+    - "mechanistic interpretability"
+    - "transformer circuits"
+    - "circuit discovery"
+    - "induction heads"
+    - "superposition neural networks"
+    - "activation patching"
+    - "sparse autoencoders"
+    - "attention head analysis"
+    - "causal tracing"
+    - "logit lens"
+    - "polysemanticity"
+    - "monosemantic features"
+
+# Timeline balance targets (percentages)
+timeline:
+  early_2017_2020:
+    min_pct: 15
+    max_pct: 25
+  middle_2021_2023:
+    min_pct: 40
+    max_pct: 50
+  recent_2024_plus:
+    min_pct: 25
+    max_pct: 35
+
+# Chunking
 chunking:
-  chunk_size_tokens: 300
-  overlap_fraction: 0.2
+  chunk_size_tokens: 450
+  overlap_fraction: 0.15
+  tokenizer: cl100k_base
 
-# --- Embedding ---
+# Embedding models
 embedding:
-  model: "all-MiniLM-L6-v2"
-  batch_size: 64
-  device: "cuda"  # "cuda" or "cpu"
+  text_model: "BAAI/bge-large-en-v1.5"
+  image_model: "google/siglip-base-patch16-224"
 
-# --- BM25 ---
-bm25:
-  remove_stopwords: true
-  lowercase: true
+# Qdrant vector database
+qdrant:
+  path: "data/qdrant_db"
+  hnsw_m: 32
+  hnsw_ef_construct: 400
+  search_ef: 200
+  collections:
+    text: "arxiv_text"
+    tables: "arxiv_tables"
+    equations: "arxiv_equations"
+    figures: "arxiv_figures"
 
-# --- Retrieval ---
+# Lexical retrieval — PostgreSQL FTS (automatic, no separate index needed)
+
+# Retrieval
 retrieval:
   k_dense: 50
-  k_lex: 50
-  merge_top_m: 20
+  k_lexical: 50
+  merge_top_m: 30
+  merge_top_m_explanatory: 40
   final_top_n: 5
-  fusion: "rrf"
-  rrf_k: 60
+  rrf_k: 60                    # Reciprocal Rank Fusion constant
+  modality_boost_factor: 1.25  # Lower boost to avoid over-indexing on modality
+  max_chunks_per_paper: 2      # Paper-level diversity cap
 
-# --- Reranker ---
-reranker:
-  model: "ms-marco-MiniLM-L-12-v2"
+# Reranking
+reranking:
+  model: "BAAI/bge-reranker-large"
   batch_size: 32
-  device: "cuda"
+  lazy_load: true
 
-# --- Ingestion ---
+# Ingestion
 ingestion:
-  categories:
-    - "cs.AI"
-    - "cs.LG"
-  max_papers: 5000
-  results_per_page: 100
+  pdf_timeout: 60
+  max_fulltext_chars: 200000
+  arxiv_rate_limit_seconds: 3
+  s2_rate_limit_seconds: 3.5

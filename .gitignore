@@ -5,6 +5,7 @@ Thumbs.db
 
 # Python
 __pycache__/
+.pytest_cache
 *.pyc
 *.pyo
 venv/
@@ -15,14 +16,21 @@ env/
 
 # Project Specific
 Implementation_guide.md
+Implementation_Plan.md
+Modification_Plan.md
+COMPLETE_ANALYSIS_AND_FIXES.md
 Metrics_Guide.md
 data/
+data_archive_legacy
 logs/
 .idea/
 .vscode/
+0.8.0
+1.9.0
 
 # Ignore sensitive files
 *.key
 *.pem
 
 arxiv_rag_data_20k.zip
+results/

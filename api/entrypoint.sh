@@ -1,41 +1,53 @@
 #!/bin/bash
 set -e
 
-DATA_DIR="/app/data"
-CHROMA_DIR="$DATA_DIR/chroma_db"
-CHROMA_SQLITE="$CHROMA_DIR/chroma.sqlite3"
-BM25_INDEX="$DATA_DIR/bm25_index.pkl"
-PAPERS_DB="$DATA_DIR/arxiv_papers.db"
+DATABASE_URL="${DATABASE_URL:-postgresql://postgres:postgres@postgres:5432/arxiv_rag}"
 
-has_chroma_shard_dir() {
-    if find "$CHROMA_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | grep -q .; then
-        return 0
-    fi
-    return 1
+wait_for_postgres() {
+    python - <<'PY'
+import os
+import sys
+import time
+
+import psycopg
+
+db_url = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@postgres:5432/arxiv_rag")
+deadline = time.time() + 60
+last_error = None
+
+while time.time() < deadline:
+    try:
+        conn = psycopg.connect(db_url, connect_timeout=5)
+        conn.close()
+        sys.exit(0)
+    except Exception as exc:
+        last_error = exc
+        time.sleep(2)
+
+print(f"Timed out waiting for PostgreSQL: {last_error}", file=sys.stderr)
+sys.exit(1)
+PY
 }
 
-is_data_ready() {
-    [ -f "$CHROMA_SQLITE" ] || return 1
-    [ -f "$BM25_INDEX" ] || return 1
-    [ -f "$PAPERS_DB" ] || return 1
-    has_chroma_shard_dir || return 1
-    return 0
+run_db_migrations() {
+    python - <<'PY'
+import os
+
+from db.database import get_db
+
+db = get_db(os.environ.get("DATABASE_URL"))
+db.run_migrations()
+db.close()
+PY
 }
 
-# --- Download data from R2 if required artifacts are missing ---
-if is_data_ready; then
-    echo "Data index already present and complete, skipping download."
-else
-    echo "Required index files are missing or incomplete. Downloading 20k-paper index from Cloudflare R2..."
-    python api/fetch_data.py
+# --- Wait for PostgreSQL to be ready ---
+echo "Waiting for PostgreSQL..."
+wait_for_postgres
 
-    if ! is_data_ready; then
-        echo "Data download did not produce all required artifacts. Exiting startup."
-        exit 1
-    fi
-
-    echo "Data download and extraction complete."
-fi
+# --- Apply schema migrations ---
+echo "Applying PostgreSQL schema migrations..."
+run_db_migrations
 
 # --- Start the FastAPI application ---
 echo "Starting FastAPI server..."

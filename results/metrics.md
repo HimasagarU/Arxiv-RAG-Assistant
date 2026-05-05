@@ -38,6 +38,8 @@
 
 ### Models
 
+This is a historical benchmark snapshot from an older 5k-paper run.
+
 | Component | Model |
 | :--- | :--- |
 | Embedder | `all-MiniLM-L6-v2` |

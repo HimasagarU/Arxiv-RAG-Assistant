@@ -1,37 +1,29 @@
 """
-chunking.py — Chunk paper text into overlapping segments for indexing.
+chunking.py — Full-text chunking for the mechanistic interpretability corpus.
 
-Supports paragraph-aware chunking and section-header detection
-for richer downstream retrieval.
+Creates retrieval chunks from paper full text only.
 
 Usage:
-    conda run -n pytorch python ingest/chunking.py [--db-path data/arxiv_papers.db]
-        [--output data/chunks.jsonl] [--source abstract|full_text|auto]
+    conda run -n pytorch python ingest/chunking.py [--source auto] [--reset]
 """
 
 import argparse
+import hashlib
 import json
+import logging
 import os
 import re
-import sqlite3
-import logging
+import sys
 from pathlib import Path
+from typing import Optional
 
 import tiktoken
 from dotenv import load_dotenv
-from tqdm import tqdm
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from db.database import get_db
 
 load_dotenv()
-
-DEFAULT_DB_PATH = os.getenv("DB_PATH", "data/arxiv_papers.db")
-DEFAULT_OUTPUT = os.getenv("CHUNKS_PATH", "data/chunks.jsonl")
-DEFAULT_CHUNK_SIZE = 512  # tokens — larger to preserve complete paragraphs
-DEFAULT_OVERLAP_FRAC = 0.15
-DEFAULT_SOURCE_MODE = os.getenv("CHUNK_SOURCE_MODE", "auto")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,125 +32,56 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Section header detection
-# ---------------------------------------------------------------------------
-
-# Regex patterns for common section headers (LaTeX-style, Markdown-style, numbered)
-_SECTION_PATTERNS = [
-    # Numbered sections: "1. Introduction", "2 Method", "3.1 Dataset"
-    re.compile(
-        r"^\s*\d+(?:\.\d+)*\.?\s+"
-        r"(introduction|related\s+work|background|preliminaries|methodology|method|methods|"
-        r"approach|model|architecture|framework|algorithm|experiments?|"
-        r"results?|evaluation|discussion|conclusion|conclusions|"
-        r"abstract|summary|overview|limitations|future\s+work|"
-        r"training|implementation|setup|analysis|ablation)",
-        re.IGNORECASE,
-    ),
-    # Unnumbered headers at line start
-    re.compile(
-        r"^(introduction|related\s+work|background|preliminaries|methodology|method|methods|"
-        r"approach|model\s+architecture|our\s+approach|proposed\s+method|"
-        r"experiments?|experimental\s+setup|results?\s+and\s+discussion|results?|"
-        r"evaluation|discussion|conclusion|conclusions|"
-        r"abstract|summary|overview|limitations|future\s+work|"
-        r"training\s+details?|implementation\s+details?|"
-        r"reward\s+model|policy\s+optimization)[\s:.\-]*$",
-        re.IGNORECASE | re.MULTILINE,
-    ),
-]
-
-# Map detected header text → canonical section_hint
-_SECTION_MAP = {
-    "introduction": "intro",
-    "abstract": "abstract",
-    "summary": "abstract",
-    "overview": "intro",
-    "related work": "background",
-    "background": "background",
-    "preliminaries": "background",
-    "methodology": "method",
-    "method": "method",
-    "methods": "method",
-    "approach": "method",
-    "our approach": "method",
-    "proposed method": "method",
-    "model architecture": "method",
-    "model": "method",
-    "architecture": "method",
-    "framework": "method",
-    "algorithm": "method",
-    "training": "method",
-    "training details": "method",
-    "implementation": "method",
-    "implementation details": "method",
-    "reward model": "method",
-    "policy optimization": "method",
-    "experiment": "results",
-    "experiments": "results",
-    "experimental setup": "results",
-    "results": "results",
-    "results and discussion": "results",
-    "evaluation": "results",
-    "analysis": "results",
-    "ablation": "results",
-    "discussion": "discussion",
-    "conclusion": "conclusion",
-    "conclusions": "conclusion",
-    "limitations": "conclusion",
-    "future work": "conclusion",
-    "setup": "method",
-}
-
-
-def detect_section_hint(text: str) -> str:
-    """
-    Detect which section of a paper a chunk likely belongs to.
-    Returns one of: intro, background, method, results, discussion,
-    conclusion, abstract, or 'other'.
-    """
-    # Check the first few lines of the chunk for a header
-    first_lines = text[:300].strip()
-
-    for pattern in _SECTION_PATTERNS:
-        match = pattern.search(first_lines)
-        if match:
-            # Get the captured group (the section name)
-            section_text = match.group(1) if match.lastindex else match.group(0)
-            section_text = section_text.strip().lower()
-            section_text = re.sub(r'[\s:.\-]+$', '', section_text)
-
-            # Look up canonical name
-            for key, hint in _SECTION_MAP.items():
-                if key in section_text:
-                    return hint
-
-    # Heuristic fallback: check for keywords in the text itself
-    text_lower = text.lower()
-    if any(kw in text_lower for kw in ["we propose", "our method", "our approach", "algorithm ", "pipeline"]):
-        return "method"
-    if any(kw in text_lower for kw in ["table ", "figure ", "accuracy", "f1 score", "benchmark", "dataset"]):
-        return "results"
-    if any(kw in text_lower for kw in ["in this paper", "we introduce", "we present", "this work"]):
-        return "intro"
-
-    return "other"
+CHUNKS_PATH = os.getenv("CHUNKS_PATH", "data/chunks.jsonl")
+DEFAULT_CHUNK_SIZE = 450
+DEFAULT_OVERLAP_FRAC = 0.15
 
 
 # ---------------------------------------------------------------------------
 # Tokenizer
 # ---------------------------------------------------------------------------
 
+
 def get_tokenizer():
-    """Get tiktoken tokenizer for token counting."""
+    """Get the tiktoken tokenizer for chunk sizing."""
     return tiktoken.get_encoding("cl100k_base")
 
 
 # ---------------------------------------------------------------------------
-# Chunking logic
+# Text chunk helpers
 # ---------------------------------------------------------------------------
+
+
+SECTION_HEADER_RE = re.compile(
+    r"^(\d+(?:\.\d+)*)\s*\.?\s*(Introduction|Related Work|Background|Method|Methods|"
+    r"Methodology|Experiments|Results|Discussion|Conclusion|Conclusions|"
+    r"Evaluation|Analysis|Ablation|Abstract|Appendix|Preliminaries)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def detect_section_hint(text: str) -> str:
+    """Detect the section a text chunk belongs to."""
+    match = SECTION_HEADER_RE.search(text)
+    if match:
+        name = match.group(2).lower()
+        mapping = {
+            "introduction": "introduction",
+            "related work": "related_work",
+            "background": "background",
+            "preliminaries": "background",
+            "method": "method", "methods": "method", "methodology": "method",
+            "experiments": "experiments", "experiment": "experiments",
+            "evaluation": "experiments",
+            "results": "results", "analysis": "results", "ablation": "results",
+            "discussion": "discussion",
+            "conclusion": "conclusion", "conclusions": "conclusion",
+            "abstract": "abstract",
+            "appendix": "appendix",
+        }
+        return mapping.get(name, "other")
+    return "other"
+
 
 def chunk_text(
     text: str,
@@ -166,221 +89,228 @@ def chunk_text(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap_frac: float = DEFAULT_OVERLAP_FRAC,
 ) -> list[dict]:
-    """
-    Split text into overlapping chunks based on token count.
-    Pure token-window fallback for text without paragraph structure.
+    """Split text into overlapping token-based chunks with section hints."""
+    if not text or not text.strip():
+        return []
+    if not 0 <= overlap_frac < 1:
+        raise ValueError("overlap_frac must be in the range [0, 1).")
 
-    Returns list of dicts with 'text', 'token_count', and 'section_hint'.
-    """
     tokens = tokenizer.encode(text, disallowed_special=())
-    total_tokens = len(tokens)
+    if not tokens:
+        return []
 
-    if total_tokens <= chunk_size:
-        return [{
-            "text": text,
-            "token_count": total_tokens,
-            "section_hint": detect_section_hint(text),
-        }]
-
-    overlap = int(chunk_size * overlap_frac)
-    step = chunk_size - overlap
+    overlap_tokens = max(0, int(chunk_size * overlap_frac))
+    if overlap_tokens >= chunk_size:
+        overlap_tokens = max(0, chunk_size - 1)
     chunks = []
+    start = 0
 
-    for start in range(0, total_tokens, step):
-        end = min(start + chunk_size, total_tokens)
+    while start < len(tokens):
+        end = min(start + chunk_size, len(tokens))
         chunk_tokens = tokens[start:end]
-        chunk_text_decoded = tokenizer.decode(chunk_tokens)
+        chunk_text_str = tokenizer.decode(chunk_tokens)
+
+        section_hint = detect_section_hint(chunk_text_str)
+
         chunks.append({
-            "text": chunk_text_decoded,
+            "chunk_text": chunk_text_str.strip(),
             "token_count": len(chunk_tokens),
-            "section_hint": detect_section_hint(chunk_text_decoded),
+            "section_hint": section_hint,
         })
-        if end >= total_tokens:
+
+        if end >= len(tokens):
             break
+        start = end - overlap_tokens
 
     return chunks
 
 
-def chunk_text_paragraphs(
-    text: str,
-    tokenizer,
-    chunk_size: int = DEFAULT_CHUNK_SIZE,
-    overlap_frac: float = DEFAULT_OVERLAP_FRAC,
-) -> list[dict]:
+# ---------------------------------------------------------------------------
+# Source text builder
+# ---------------------------------------------------------------------------
+
+
+def _strip_non_retrieval_sections(text: str) -> str:
+    """Remove references, bibliography, acknowledgements, and appendix sections.
+    
+    These sections don't contribute useful retrieval signal and add noise.
     """
-    Paragraph-aware chunking: split on double-newlines first, then merge
-    paragraphs into chunks up to the token limit. Preserves paragraph
-    boundaries for more coherent chunks.
-
-    Falls back to token-window chunking for text without paragraph breaks.
-    """
-    # Split into paragraphs
-    paragraphs = re.split(r'\n\s*\n', text.strip())
-    paragraphs = [p.strip() for p in paragraphs if p.strip()]
-
-    # If no paragraph structure detected, fall back to token-window
-    if len(paragraphs) <= 1:
-        return chunk_text(text, tokenizer, chunk_size, overlap_frac)
-
-    # Merge paragraphs into chunks respecting token limits
-    chunks = []
-    current_paragraphs = []
-    current_tokens = 0
-
-    for para in paragraphs:
-        para_tokens = len(tokenizer.encode(para, disallowed_special=()))
-
-        # If a single paragraph exceeds the chunk size, chunk it with token-window
-        if para_tokens > chunk_size:
-            # Flush current buffer first
-            if current_paragraphs:
-                chunk_text_str = "\n\n".join(current_paragraphs)
-                chunks.append({
-                    "text": chunk_text_str,
-                    "token_count": current_tokens,
-                    "section_hint": detect_section_hint(chunk_text_str),
-                })
-                current_paragraphs = []
-                current_tokens = 0
-
-            # Chunk the large paragraph with token-window
-            sub_chunks = chunk_text(para, tokenizer, chunk_size, overlap_frac)
-            chunks.extend(sub_chunks)
-            continue
-
-        # Would adding this paragraph exceed the limit?
-        if current_tokens + para_tokens > chunk_size and current_paragraphs:
-            # Flush current buffer
-            chunk_text_str = "\n\n".join(current_paragraphs)
-            chunks.append({
-                "text": chunk_text_str,
-                "token_count": current_tokens,
-                "section_hint": detect_section_hint(chunk_text_str),
-            })
-
-            # Start new buffer with overlap: keep last paragraph for context
-            overlap_para = current_paragraphs[-1] if current_paragraphs else ""
-            overlap_tokens = len(tokenizer.encode(overlap_para, disallowed_special=())) if overlap_para else 0
-            current_paragraphs = [overlap_para] if overlap_para else []
-            current_tokens = overlap_tokens
-
-        current_paragraphs.append(para)
-        current_tokens += para_tokens
-
-    # Flush remaining
-    if current_paragraphs:
-        chunk_text_str = "\n\n".join(current_paragraphs)
-        actual_tokens = len(tokenizer.encode(chunk_text_str, disallowed_special=()))
-        chunks.append({
-            "text": chunk_text_str,
-            "token_count": actual_tokens,
-            "section_hint": detect_section_hint(chunk_text_str),
-        })
-
-    return chunks
+    # Patterns that mark the start of non-retrieval sections
+    cut_patterns = [
+        r"(?:^|\n)\s*(?:\d+(?:\.\d+)*\s*\.?\s*)?(?:References|Bibliography|Works Cited)\s*\n",
+        r"(?:^|\n)\s*(?:\d+(?:\.\d+)*\s*\.?\s*)?Acknowledg(?:e)?ments?\s*\n",
+        r"(?:^|\n)\s*(?:\d+(?:\.\d+)*\s*\.?\s*)?Appendix\s*(?:[A-Z])?\s*\n",
+        r"(?:^|\n)\s*(?:\d+(?:\.\d+)*\s*\.?\s*)?Supplementary\s+Materials?\s*\n",
+    ]
+    
+    earliest_cut = len(text)
+    for pattern in cut_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match and match.start() < earliest_cut:
+            earliest_cut = match.start()
+    
+    if earliest_cut < len(text):
+        text = text[:earliest_cut].rstrip()
+    
+    return text
 
 
 def build_chunk_source_text(paper: dict, source_mode: str = "auto") -> str:
-    """Build text that will be chunked from selected source mode."""
+    """Build the text to chunk from a paper record."""
     title = (paper.get("title") or "").strip()
     abstract = (paper.get("abstract") or "").strip()
     full_text = (paper.get("full_text") or "").strip()
 
     if source_mode == "abstract":
-        body = abstract
+        base = abstract
     elif source_mode == "full_text":
-        body = full_text
+        if not full_text:
+            return ""
+        base = full_text
     elif source_mode == "auto":
-        body = full_text or abstract
+        base = full_text if full_text else abstract
     else:
-        raise ValueError(f"Unsupported source_mode: {source_mode}")
+        base = full_text if full_text else abstract
 
-    if not body:
+    if not base:
         return ""
-    return f"{title}. {body}" if title else body
+
+    # Strip references, acknowledgements, appendix before chunking
+    if len(base) > 500:  # Only for full text, not abstracts
+        base = _strip_non_retrieval_sections(base)
+
+    return f"{title}. {base}" if title else base
 
 
-def resolve_chunk_source(paper: dict, source_mode: str) -> str:
-    """Resolve actual source used for a chunk when mode can fallback."""
-    if source_mode != "auto":
-        return source_mode
-    return "full_text" if (paper.get("full_text") or "").strip() else "abstract"
+# ---------------------------------------------------------------------------
+# Main chunking pipeline
+# ---------------------------------------------------------------------------
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    """Check whether a SQLite table has a given column name."""
-    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-    return column in cols
-
-
-def process_papers(
-    db_path: str,
-    output_path: str,
+def chunk_paper(
+    paper: dict,
+    tokenizer,
+    source_mode: str = "auto",
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     overlap_frac: float = DEFAULT_OVERLAP_FRAC,
-    source_mode: str = DEFAULT_SOURCE_MODE,
+) -> list[dict]:
+    """Chunk a single paper into text chunks."""
+    paper_id = paper["paper_id"]
+    title = paper.get("title", "")
+    authors = paper.get("authors", "")
+    categories = paper.get("categories", "")
+    layer = paper.get("layer", "core")
+
+    all_chunks = []
+
+    # Text chunks from full text / abstract
+    source_text = build_chunk_source_text(paper, source_mode)
+    if source_text:
+        text_chunks = chunk_text(source_text, tokenizer, chunk_size, overlap_frac)
+        chunk_source = source_mode
+        if source_mode == "auto":
+            chunk_source = "full_text" if paper.get("full_text", "").strip() else "abstract"
+
+        for idx, tc in enumerate(text_chunks):
+            chunk_id = f"{paper_id}_text_{idx}"
+            all_chunks.append({
+                "chunk_id": chunk_id,
+                "paper_id": paper_id,
+                "chunk_type": "text",
+                "modality": "text",
+                "chunk_text": tc["chunk_text"],
+                "section_hint": tc["section_hint"],
+                "page_start": None,
+                "page_end": None,
+                "token_count": tc["token_count"],
+                "chunk_index": idx,
+                "total_chunks": len(text_chunks),
+                "chunk_source": chunk_source,
+                "layer": layer,
+                "artifact_meta": {},
+                # Extra metadata for JSONL compat
+                "title": title,
+                "authors": authors,
+                "categories": categories,
+            })
+
+    return all_chunks
+
+
+def run_chunking(
+    source_mode: str = "auto",
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    overlap_frac: float = DEFAULT_OVERLAP_FRAC,
+    limit: int = 0,
+    reset: bool = False,
 ):
-    """Read papers from SQLite, chunk selected source text, write JSONL."""
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-
-    has_full_text = _has_column(conn, "papers", "full_text")
-    select_fields = "paper_id, title, abstract, authors, categories"
-    if has_full_text:
-        select_fields += ", full_text"
-
-    papers = conn.execute(
-        f"SELECT {select_fields} FROM papers"
-    ).fetchall()
-    conn.close()
-
-    if not papers:
-        log.error(f"No papers found in {db_path}")
-        return 0
-
+    """Run chunking for all papers in the corpus."""
+    db = get_db()
+    db.run_migrations()
     tokenizer = get_tokenizer()
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    papers = db.get_all_papers(limit=limit)
+    log.info(f"Chunking {len(papers)} papers (source={source_mode}, size={chunk_size}, overlap={overlap_frac})")
+
+    if reset:
+        log.info("Reset flag set: clearing existing chunks before rebuild.")
+        db.delete_all_chunks()
+        db.commit()
+
+    chunks_path = Path(CHUNKS_PATH)
+    chunks_path.parent.mkdir(parents=True, exist_ok=True)
 
     total_chunks = 0
-    skipped_no_source = 0
+    type_counts = {"text": 0}
 
-    with open(output_path, "w", encoding="utf-8") as f:
-        for row in tqdm(papers, desc="Chunking papers", unit="paper"):
-            paper = dict(row)
-            source_text = build_chunk_source_text(paper, source_mode=source_mode)
-            if not source_text:
-                skipped_no_source += 1
+    with open(chunks_path, "w", encoding="utf-8") as f:
+        for idx, paper in enumerate(papers):
+            paper_chunks = chunk_paper(paper, tokenizer, source_mode, chunk_size, overlap_frac)
+
+            if not paper_chunks:
                 continue
 
-            chunk_source = resolve_chunk_source(paper, source_mode)
-
-            # Use paragraph-aware chunking for full_text, token-window for abstracts
-            if chunk_source == "full_text":
-                chunks = chunk_text_paragraphs(source_text, tokenizer, chunk_size, overlap_frac)
-            else:
-                chunks = chunk_text(source_text, tokenizer, chunk_size, overlap_frac)
-
-            for i, chunk in enumerate(chunks):
-                chunk_record = {
-                    "chunk_id": f"{paper['paper_id']}_chunk_{i}",
-                    "paper_id": paper["paper_id"],
-                    "chunk_text": chunk["text"],
-                    "title": paper["title"],
-                    "authors": paper["authors"],
-                    "categories": paper["categories"],
-                    "token_count": chunk["token_count"],
-                    "chunk_index": i,
-                    "total_chunks": len(chunks),
-                    "chunk_source": chunk_source,
+            for chunk in paper_chunks:
+                # Write to JSONL
+                jsonl_record = {
+                    "chunk_id": chunk["chunk_id"],
+                    "paper_id": chunk["paper_id"],
+                    "chunk_type": chunk["chunk_type"],
+                    "modality": chunk["modality"],
+                    "chunk_text": chunk["chunk_text"],
+                    "title": chunk.get("title", ""),
+                    "authors": chunk.get("authors", ""),
+                    "categories": chunk.get("categories", ""),
                     "section_hint": chunk.get("section_hint", "other"),
+                    "page_start": chunk.get("page_start"),
+                    "page_end": chunk.get("page_end"),
+                    "token_count": chunk["token_count"],
+                    "chunk_index": chunk.get("chunk_index", 0),
+                    "total_chunks": chunk.get("total_chunks", 1),
+                    "chunk_source": chunk.get("chunk_source", "full_text"),
+                    "layer": chunk.get("layer", "core"),
                 }
-                f.write(json.dumps(chunk_record) + "\n")
+                f.write(json.dumps(jsonl_record, ensure_ascii=False) + "\n")
+
+                # Insert to PostgreSQL
+                db.insert_chunk(chunk)
+
+                type_counts[chunk["chunk_type"]] = type_counts.get(chunk["chunk_type"], 0) + 1
                 total_chunks += 1
 
-    log.info(
-        f"Created {total_chunks} chunks from {len(papers)} papers "
-        f"(source_mode={source_mode}, skipped_without_source={skipped_no_source}) → {output_path}"
-    )
+            if (idx + 1) % 50 == 0:
+                db.commit()
+                log.info(f"  Chunked {idx + 1}/{len(papers)} papers ({total_chunks} chunks)")
+
+    db.commit()
+
+    log.info(f"\nChunking complete:")
+    log.info(f"  Total chunks:    {total_chunks}")
+    log.info(f"  By type:         {type_counts}")
+    log.info(f"  JSONL:           {chunks_path}")
+    log.info(f"  PostgreSQL:      {db.count_chunks()} rows")
+
+    db.close()
     return total_chunks
 
 
@@ -388,32 +318,27 @@ def process_papers(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
-    parser = argparse.ArgumentParser(description="Chunk paper text for indexing")
-    parser.add_argument("--db-path", type=str, default=DEFAULT_DB_PATH,
-                        help="SQLite database path")
-    parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT,
-                        help="Output JSONL file path")
+    parser = argparse.ArgumentParser(description="Full-text chunking")
+    parser.add_argument("--source", choices=["abstract", "full_text", "auto"], default="auto",
+                        help="Text source mode")
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
-                        help="Chunk size in tokens (default: 512)")
+                        help="Target chunk size in tokens")
     parser.add_argument("--overlap", type=float, default=DEFAULT_OVERLAP_FRAC,
-                        help="Overlap fraction (default: 0.15)")
-    parser.add_argument("--source", type=str, default=DEFAULT_SOURCE_MODE,
-                        choices=["abstract", "full_text", "auto"],
-                        help="Source text mode: abstract, full_text, or auto (prefer full_text)")
+                        help="Overlap fraction between chunks")
+    parser.add_argument("--limit", type=int, default=0, help="Max papers to chunk (0=all)")
+    parser.add_argument("--reset", action="store_true",
+                        help="Delete all existing chunks before rebuilding")
     args = parser.parse_args()
 
-    total = process_papers(
-        args.db_path,
-        args.output,
-        args.chunk_size,
-        args.overlap,
+    run_chunking(
         source_mode=args.source,
+        chunk_size=args.chunk_size,
+        overlap_frac=args.overlap,
+        limit=args.limit,
+        reset=args.reset,
     )
-    if total == 0:
-        log.error("No chunks created. Check database content.")
-    else:
-        log.info(f"Done. {total} chunks ready for indexing.")
 
 
 if __name__ == "__main__":

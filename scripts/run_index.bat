@@ -1,17 +1,16 @@
 @echo off
-REM run_index.bat — Build Chroma and BM25 indexes
+REM run_index.bat — Build Qdrant Cloud index and rely on PostgreSQL FTS
 echo ============================================
-echo  ArXiv RAG — Index Build Pipeline
+echo  ArXiv RAG — Index Build Pipeline (Cloud)
 echo ============================================
 
 echo.
-echo [1/2] Building Chroma vector index (GPU)...
-conda run -n pytorch python index/build_chroma.py
+echo [1/2] Building Qdrant Cloud vector index...
+conda run -n pytorch python index/build_qdrant.py
 
 echo.
-echo [2/2] Building BM25 lexical index...
-conda run -n pytorch python index/build_bm25.py
+echo [2/2] PostgreSQL full-text search is automatic; no separate index needed.
 
 echo.
-echo Done! Indexes built in data/
+echo Done! Cloud indexes are ready.
 pause

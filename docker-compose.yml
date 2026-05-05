@@ -1,6 +1,20 @@
-version: "3.8"
-
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: arxiv-rag-postgres
+    environment:
+      POSTGRES_DB: arxiv_rag
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d arxiv_rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
   api:
     build:
       context: .
@@ -8,15 +22,20 @@ services:
     container_name: arxiv-rag-api
     ports:
       - "8000:8000"
-    volumes:
-      - ./data:/app/data:ro
     environment:
-      - CHROMA_DIR=/app/data/chroma_db
-      - BM25_INDEX_PATH=/app/data/bm25_index.pkl
-      - DB_PATH=/app/data/arxiv_papers.db
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/arxiv_rag
+      - QDRANT_URL=${QDRANT_URL}
+      - QDRANT_API_KEY=${QDRANT_API_KEY}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8000/health" ]
       interval: 30s
       timeout: 10s
       retries: 3
+
+volumes:
+  postgres_data:

@@ -141,7 +141,7 @@ class TestIngestion:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.skipif(
-    not os.path.exists("data/chroma_db") or not os.path.exists("data/bm25_index.pkl"),
+    not os.path.exists("data/chroma_db"),
     reason="Indexes not built yet",
 )
 class TestIntegration:
@@ -161,29 +161,15 @@ class TestIntegration:
         assert "trace" in result
         assert len(result["passages"]) <= 3
 
-    def test_dense_only_mode_when_bm25_disabled(self, monkeypatch):
+    def test_lexical_filtering_uses_chroma_metadata(self, monkeypatch):
         from api.retrieval import HybridRetriever
 
-        monkeypatch.setenv("ENABLE_BM25", "false")
-        retriever = HybridRetriever()
-        result = retriever.retrieve("transformer attention mechanism", top_n=3)
-
-        assert retriever.enable_bm25 is False
-        assert result["trace"].get("bm25_enabled") is False
-        assert result["trace"].get("bm25_ids") == []
-        assert "passages" in result
-        assert len(result["passages"]) <= 3
-
-    def test_bm25_filtering_uses_chroma_metadata(self, monkeypatch):
-        from api.retrieval import HybridRetriever
-
-        monkeypatch.setenv("ENABLE_BM25", "true")
         retriever = HybridRetriever()
         query = "learning"
 
-        base_candidates = retriever._bm25_retrieve(query)
+        base_candidates = retriever._lexical_retrieve(query)
         if not base_candidates:
-            pytest.skip("No BM25 candidates available for metadata filter test.")
+            pytest.skip("No lexical candidates available for metadata filter test.")
 
         sample_id = base_candidates[0]["chunk_id"]
         fetched = retriever.collection.get(ids=[sample_id], include=["metadatas"])
@@ -202,7 +188,7 @@ class TestIntegration:
         )
 
         if sample_category:
-            category_candidates = retriever._bm25_retrieve(query, category=sample_category)
+            category_candidates = retriever._lexical_retrieve(query, category=sample_category)
             assert sample_id in {c["chunk_id"] for c in category_candidates}
             assert all(
                 sample_category.lower() in c.get("metadata", {}).get("categories", "").lower()
@@ -210,7 +196,7 @@ class TestIntegration:
             )
 
         if sample_author:
-            author_candidates = retriever._bm25_retrieve(query, author=sample_author)
+            author_candidates = retriever._lexical_retrieve(query, author=sample_author)
             assert sample_id in {c["chunk_id"] for c in author_candidates}
             assert all(
                 sample_author.lower() in c.get("metadata", {}).get("authors", "").lower()

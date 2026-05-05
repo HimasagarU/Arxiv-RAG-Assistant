@@ -14,7 +14,7 @@ Usage:
 import json
 import logging
 import os
-import sqlite3
+import threading
 import time
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -42,7 +42,6 @@ log = logging.getLogger(__name__)
 # Configuration
 # ---------------------------------------------------------------------------
 
-DB_PATH = os.getenv("DB_PATH", "data/arxiv_papers.db")
 LOGS_DIR = "logs"
 Path(LOGS_DIR).mkdir(exist_ok=True)
 
@@ -58,31 +57,35 @@ class LRUCache:
         self._cache: OrderedDict = OrderedDict()
         self._max_size = max_size
         self._ttl = ttl_seconds
+        self._lock = threading.Lock()
 
     def _make_key(self, query: str, top_k: int, category: str = None,
                   author: str = None, start_year: int = None) -> str:
         return f"{query.strip().lower()}|{top_k}|{category or ''}|{author or ''}|{start_year or ''}"
 
     def get(self, key: str):
-        if key in self._cache:
-            entry = self._cache[key]
-            if time.time() - entry["timestamp"] < self._ttl:
-                self._cache.move_to_end(key)
-                return entry["data"]
-            else:
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache[key]
+                if time.time() - entry["timestamp"] < self._ttl:
+                    self._cache.move_to_end(key)
+                    return entry["data"]
                 del self._cache[key]
-        return None
+            return None
 
     def set(self, key: str, data: dict):
-        if key in self._cache:
-            del self._cache[key]
-        self._cache[key] = {"data": data, "timestamp": time.time()}
-        if len(self._cache) > self._max_size:
-            self._cache.popitem(last=False)
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+            self._cache[key] = {"data": data, "timestamp": time.time()}
+            if len(self._cache) > self._max_size:
+                self._cache.popitem(last=False)
 
     @property
     def stats(self) -> dict:
-        return {"size": len(self._cache), "max_size": self._max_size, "ttl": self._ttl}
+        with self._lock:
+            size = len(self._cache)
+        return {"size": size, "max_size": self._max_size, "ttl": self._ttl}
 
 
 query_cache = LRUCache(max_size=128, ttl_seconds=300)
@@ -107,12 +110,17 @@ class SourceInfo(BaseModel):
     authors: str = ""
     categories: str = ""
     chunk_text: str
+    chunk_type: str = "text"
+    modality: str = "text"
+    section_hint: str = "other"
+    layer: str = "core"
     rerank_score: float = 0.0
 
 
 class AnalyticsInfo(BaseModel):
-    top_authors: list[dict] = []
-    top_categories: list[dict] = []
+    top_authors: list[dict] = Field(default_factory=list)
+    top_categories: list[dict] = Field(default_factory=list)
+    layer_distribution: dict = Field(default_factory=dict)
     total_unique_papers: int = 0
 
 
@@ -121,7 +129,7 @@ class QueryResponse(BaseModel):
     sources: list[SourceInfo]
     latency_ms: float
     retrieval_trace: dict
-    analytics: AnalyticsInfo = AnalyticsInfo()
+    analytics: AnalyticsInfo = Field(default_factory=AnalyticsInfo)
     cached: bool = False
 
 
@@ -130,6 +138,7 @@ class SimilarPaperInfo(BaseModel):
     title: str
     authors: str = ""
     categories: str = ""
+    layer: str = ""
     similarity_score: float = 0.0
     chunk_text: str = ""
 
@@ -147,14 +156,16 @@ class PaperResponse(BaseModel):
     categories: str
     pdf_url: str
     published: str
+    layer: str = "core"
+    is_seed: bool = False
 
 
 class HealthResponse(BaseModel):
     status: str
-    chroma_docs: int = 0
+    collections: dict = Field(default_factory=dict)
     db_papers: int = 0
     uptime_seconds: float = 0.0
-    cache_stats: dict = {}
+    cache_stats: dict = Field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -200,17 +211,22 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="ArXiv RAG Assistant",
-    description="Hybrid RAG system for ArXiv papers with dense + BM25 retrieval and cross-encoder reranking.",
+    description="Hybrid RAG system for ArXiv papers with Qdrant Cloud dense retrieval, PostgreSQL full-text search, and cross-encoder reranking.",
     version="2.0.0",
     lifespan=lifespan,
 )
 
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+if not allowed_origins:
+    allowed_origins = ["http://localhost:3000"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 
 # Serve frontend
@@ -368,16 +384,15 @@ def get_system_prompt(intent: str = "discovery") -> str:
 
 def generate_answer(prompt: str, intent: str = "discovery") -> str:
     """
-    Generate an answer using Groq API (free tier, ultra-fast inference).
-    Falls back to local extractive summary if GROQ_API_KEY is not set.
+    Generate an answer using Groq API.
+    This project requires the remote LLM path.
     """
     groq_api_key = os.getenv("GROQ_API_KEY")
 
-    if groq_api_key:
-        return _generate_groq(prompt, groq_api_key, intent=intent)
-    else:
-        log.warning("GROQ_API_KEY not set — using local extractive summary.")
-        return _generate_local_fallback(prompt)
+    if not groq_api_key:
+        raise RuntimeError("GROQ_API_KEY is required for answer generation.")
+
+    return _generate_groq(prompt, groq_api_key, intent=intent)
 
 
 def _generate_groq(prompt: str, api_key: str, intent: str = "discovery") -> str:
@@ -405,7 +420,7 @@ def _generate_groq(prompt: str, api_key: str, intent: str = "discovery") -> str:
 
     except Exception as e:
         log.error(f"Groq API error: {e}")
-        return f"[Groq API error: {e}] — Falling back to source extraction.\n\n" + _generate_local_fallback(prompt)
+        raise
 
 
 def _generate_groq_stream(prompt: str, api_key: str, intent: str = "discovery"):
@@ -432,37 +447,6 @@ def _generate_groq_stream(prompt: str, api_key: str, intent: str = "discovery"):
         delta = chunk.choices[0].delta
         if delta and delta.content:
             yield delta.content
-
-
-def _generate_local_fallback(prompt: str) -> str:
-    """Fallback: extract and summarize from passages without LLM."""
-    lines = prompt.split("\n")
-    sources_section = []
-    in_context = False
-
-    for line in lines:
-        if line.strip().startswith("Context:"):
-            in_context = True
-            continue
-        if line.strip().startswith("Source References:"):
-            break
-        if in_context and line.strip():
-            sources_section.append(line.strip())
-
-    if not sources_section:
-        return "I couldn't find relevant information in the retrieved sources to answer this question."
-
-    question_line = [l for l in lines if l.strip().startswith("Question:")]
-    query = question_line[0].replace("Question:", "").strip() if question_line else ""
-
-    answer_parts = [f"Based on the retrieved ArXiv papers, here is what I found regarding '{query}':\n"]
-    seen = set()
-    for text in sources_section[:5]:
-        if text not in seen and len(text) > 20:
-            seen.add(text)
-            answer_parts.append(f"• {text}")
-
-    return "\n".join(answer_parts)
 
 
 # ---------------------------------------------------------------------------
@@ -676,7 +660,6 @@ async def query_stream_endpoint(request: QueryRequest):
             "retrieval_trace": trace,
             "analytics": analytics,
             "retrieval_ms": retrieval_ms,
-            "arxiv_api_fallback": trace.get("arxiv_api_fallback", False),
             "intent": intent,
         })
         yield f"data: {meta_payload}\n\n"
@@ -709,15 +692,14 @@ async def query_stream_endpoint(request: QueryRequest):
 @app.get("/paper/{paper_id}", response_model=PaperResponse)
 async def get_paper(paper_id: str):
     """Look up paper metadata by ArXiv ID."""
-    if not os.path.exists(DB_PATH):
-        raise HTTPException(status_code=503, detail="Database not found.")
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        "SELECT * FROM papers WHERE paper_id = ?", (paper_id,)
-    ).fetchone()
-    conn.close()
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from db.database import get_db
+        db = get_db()
+        row = db.get_paper(paper_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Database error: {e}")
 
     if not row:
         raise HTTPException(status_code=404, detail=f"Paper '{paper_id}' not found.")
@@ -726,10 +708,12 @@ async def get_paper(paper_id: str):
         paper_id=row["paper_id"],
         title=row["title"],
         abstract=row["abstract"],
-        authors=row["authors"],
-        categories=row["categories"],
-        pdf_url=row["pdf_url"],
-        published=row["published"],
+        authors=row.get("authors", ""),
+        categories=row.get("categories", ""),
+        pdf_url=row.get("pdf_url", ""),
+        published=str(row.get("published", "")),
+        layer=row.get("layer", "core"),
+        is_seed=row.get("is_seed", False),
     )
 
 
@@ -750,29 +734,34 @@ async def get_similar_papers(paper_id: str, top_n: int = 5):
     )
 
 
+@app.get("/keep-alive")
+async def keep_alive():
+    """Lightweight endpoint to keep the server awake."""
+    return {"status": "alive", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check with basic metrics."""
-    chroma_docs = 0
+    """Health check with per-collection counts."""
+    collections = {}
     db_papers = 0
 
     if _state["retriever"] is not None:
-        try:
-            chroma_docs = _state["retriever"].collection.count()
-        except Exception:
-            pass
+        # collections is a dict of {name: points_count} from Qdrant retriever
+        collections = dict(_state["retriever"].collections)
 
-    if os.path.exists(DB_PATH):
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            db_papers = conn.execute("SELECT COUNT(*) FROM papers").fetchone()[0]
-            conn.close()
-        except Exception:
-            pass
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from db.database import get_db
+        db = get_db()
+        db_papers = db.count_papers()
+    except Exception:
+        pass
 
     return HealthResponse(
         status="healthy",
-        chroma_docs=chroma_docs,
+        collections=collections,
         db_papers=db_papers,
         uptime_seconds=round(time.time() - _state["start_time"], 1),
         cache_stats=query_cache.stats,

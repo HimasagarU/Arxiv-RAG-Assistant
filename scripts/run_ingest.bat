@@ -10,7 +10,7 @@ conda run -n pytorch python ingest/ingest_arxiv.py --max-papers 10000 --include-
 
 echo.
 echo [2/2] Chunking papers (source=auto, prefer full_text)...
-conda run -n pytorch python ingest/chunking.py --source auto
+conda run -n pytorch python ingest/chunking.py --source auto --reset
 
 echo.
 echo Done! Check data/ for arxiv_papers.db and chunks.jsonl
