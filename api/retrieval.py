@@ -125,7 +125,7 @@ class HybridRetriever:
         qdrant_url = qdrant_url or os.getenv("QDRANT_URL")
         qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
         embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
-        reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-large")
+        reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
         log.info("Initializing HybridRetriever (Qdrant text-only)")
 
