@@ -807,7 +807,7 @@
                 <div class="loading-text">Searching mechanistic interpretability papers…</div>
                 <div class="loading-steps">
                     <div class="loading-step active" id="stepDense">⟳ Dense retrieval (semantic search)</div>
-                    <div class="loading-step" id="stepFTS">○ FTS retrieval (keyword match)</div>
+                    <div class="loading-step" id="stepBM25">○ BM25 retrieval (lexical match)</div>
                     <div class="loading-step" id="stepRerank">○ Cross-encoder reranking</div>
                     <div class="loading-step" id="stepGenerate">○ Generating answer</div>
                 </div>
@@ -844,7 +844,7 @@
 
         <!-- Footer -->
         <footer class="footer">
-            ArXiv Research Assistant · Hybrid Dense + FTS + Cross-Encoder Reranking ·
+            ArXiv Research Assistant · Hybrid Dense + BM25 + Cross-Encoder Reranking ·
             <a href="https://groq.com" target="_blank">Groq</a> &amp;
             <a href="https://arxiv.org" target="_blank">ArXiv API</a>
         </footer>
@@ -1143,7 +1143,7 @@
                 </div>
                 <div class="latency-chip streaming-chip">⚡ Streaming</div>
                 <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">FTS <span class="value">${(trace.lex_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">BM25 <span class="value">${(trace.lex_ms || 0).toFixed(0)}ms</span></div>
                 <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>`;
 
             if (trace.compress_ms) {
@@ -1199,7 +1199,7 @@
 
             latencyHtml += `
                 <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">FTS <span class="value">${(trace.lex_ms || 0).toFixed(0)}ms</span></div>
+                <div class="latency-chip">BM25 <span class="value">${(trace.lex_ms || 0).toFixed(0)}ms</span></div>
                 <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>
                 <div class="latency-chip">LLM <span class="value">${(trace.generation_ms || 0).toFixed(0)}ms</span></div>`;
 
@@ -1295,8 +1295,8 @@
         // Loading Animation
         // ============================================
         function animateLoadingSteps() {
-            const steps = ['stepDense', 'stepFTS', 'stepRerank', 'stepGenerate'];
-            const labels = ['Dense retrieval (semantic search)', 'FTS retrieval (keyword match)', 'Cross-encoder reranking', 'Generating answer'];
+            const steps = ['stepDense', 'stepBM25', 'stepRerank', 'stepGenerate'];
+            const labels = ['Dense retrieval (semantic search)', 'BM25 retrieval (lexical match)', 'Cross-encoder reranking', 'Generating answer'];
             const delays = [0, 400, 900, 1500];
 
             steps.forEach((id, i) => {
