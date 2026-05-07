@@ -91,8 +91,9 @@ class Reranker:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
             return passages[:top_n]
 
-        # Pass more candidates through the reranker than requested
-        rerank_pool_size = min(len(passages), top_n * 3)
+        # Pass more candidates through the reranker than requested (limit drastically if on slow CPU)
+        multiplier = 3 if self.device != "cpu" else 1
+        rerank_pool_size = min(len(passages), top_n * multiplier)
         rerank_pool = passages[:rerank_pool_size]
 
         # Build [query, text] pairs for cross-encoder

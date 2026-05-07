@@ -753,6 +753,10 @@ async def health_check():
         # collections is a dict of {name: points_count} from Qdrant retriever
         collections = dict(_state["retriever"].collections)
         db_papers = len(_state["retriever"].papers_meta)
+        
+        # If Qdrant points count isn't immediately available, use our local BM25 chunks count
+        if "arxiv_text" not in collections:
+            collections["arxiv_text"] = len(_state["retriever"].chunks_meta)
 
     return HealthResponse(
         status="healthy",
