@@ -1,3 +1,11 @@
+---
+title: Arxiv RAG Assistant
+emoji: 📚
+colorFrom: red
+colorTo: red
+sdk: docker
+pinned: false
+---
 # ArXiv RAG Assistant — Mechanistic Interpretability
 
 A production-grade **Retrieval-Augmented Generation (RAG)** system specialized for **mechanistic interpretability** research. Built around a curated corpus of transformer circuits, sparse autoencoders, activation patching, and related papers spanning 2017–2025.
