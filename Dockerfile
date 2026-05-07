@@ -19,6 +19,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	wget \
  && rm -rf /var/lib/apt/lists/*
 
+# Fix permissions before switching to the non-root user
+RUN chown -R user:user $HOME/app
+
 # Switch to the non-root user
 USER user
 
