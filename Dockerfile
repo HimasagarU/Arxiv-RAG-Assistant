@@ -1,8 +1,13 @@
 FROM python:3.11-slim
 
-WORKDIR /app
+# Create a non-root user "user" with UID 1000 (Required by HF Spaces)
+RUN useradd -m -u 1000 user
+ENV HOME=/home/user \
+	PATH=/home/user/.local/bin:$PATH
 
-# Install minimal system dependencies needed for PyTorch and PDF tools
+WORKDIR $HOME/app
+
+# Install minimal system dependencies needed for PyTorch and PDF tools as root
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	build-essential \
 	ca-certificates \
@@ -14,24 +19,27 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 	wget \
  && rm -rf /var/lib/apt/lists/*
 
+# Switch to the non-root user
+USER user
+
 # Install PyTorch (CPU) wheels first, then other Python requirements
-COPY requirements.txt .
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
+COPY --chown=user requirements.txt .
+RUN pip install --user --no-cache-dir --index-url https://download.pytorch.org/whl/cpu \
 	"torch>=2.0.0" "torchvision>=0.15.0" "torchaudio>=2.0.0" \
- && pip install --no-cache-dir -r requirements.txt
+ && pip install --user --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY api/ api/
-COPY rerank/ rerank/
-COPY frontend/ frontend/
-COPY index/params.yaml index/params.yaml
+COPY --chown=user api/ api/
+COPY --chown=user rerank/ rerank/
+COPY --chown=user frontend/ frontend/
+COPY --chown=user index/ index/
 
 # Create data directory
-RUN mkdir -p /app/data
+RUN mkdir -p $HOME/app/data
 
 # Make entrypoint executable
 RUN chmod +x api/entrypoint.sh
 
 EXPOSE 7860
 
-ENTRYPOINT ["/app/api/entrypoint.sh"]
+ENTRYPOINT ["./api/entrypoint.sh"]
