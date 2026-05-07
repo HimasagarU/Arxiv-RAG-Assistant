@@ -189,16 +189,24 @@ async def lifespan(app: FastAPI):
     log.info("Starting ArXiv RAG API...")
     _state["start_time"] = time.time()
 
-    try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from api.retrieval import HybridRetriever
+    def init_retriever():
+        try:
+            import sys
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from api.fetch_data import fetch_and_extract
+            
+            log.info("Running data bootstrapper...")
+            fetch_and_extract()
+            
+            from api.retrieval import HybridRetriever
+            _state["retriever"] = HybridRetriever()
+            log.info("HybridRetriever initialized successfully.")
+        except Exception as e:
+            log.error(f"Failed to initialize retriever: {e}")
+            log.warning("API will start but /query endpoint will be unavailable.")
 
-        _state["retriever"] = HybridRetriever()
-        log.info("HybridRetriever initialized successfully.")
-    except Exception as e:
-        log.error(f"Failed to initialize retriever: {e}")
-        log.warning("API will start but /query endpoint will be unavailable.")
+    # Start retrieval initialization in background to not block HF Spaces readiness probe
+    threading.Thread(target=init_retriever, daemon=True).start()
 
     yield
 
@@ -692,28 +700,23 @@ async def query_stream_endpoint(request: QueryRequest):
 @app.get("/paper/{paper_id}", response_model=PaperResponse)
 async def get_paper(paper_id: str):
     """Look up paper metadata by ArXiv ID."""
-    try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from db.database import get_db
-        db = get_db()
-        row = db.get_paper(paper_id)
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Database error: {e}")
-
-    if not row:
+    if _state["retriever"] is None:
+        raise HTTPException(status_code=503, detail="Retriever not yet initialized.")
+        
+    paper_info = _state["retriever"].papers_meta.get(paper_id)
+    if not paper_info:
         raise HTTPException(status_code=404, detail=f"Paper '{paper_id}' not found.")
 
     return PaperResponse(
-        paper_id=row["paper_id"],
-        title=row["title"],
-        abstract=row["abstract"],
-        authors=row.get("authors", ""),
-        categories=row.get("categories", ""),
-        pdf_url=row.get("pdf_url", ""),
-        published=str(row.get("published", "")),
-        layer=row.get("layer", "core"),
-        is_seed=row.get("is_seed", False),
+        paper_id=paper_id,
+        title=paper_info.get("title", ""),
+        abstract=paper_info.get("abstract", ""),
+        authors=paper_info.get("authors", ""),
+        categories=paper_info.get("categories", ""),
+        pdf_url=paper_info.get("pdf_url", ""),
+        published=str(paper_info.get("published", "")),
+        layer=paper_info.get("layer", "core"),
+        is_seed=paper_info.get("is_seed", False),
     )
 
 
@@ -749,15 +752,7 @@ async def health_check():
     if _state["retriever"] is not None:
         # collections is a dict of {name: points_count} from Qdrant retriever
         collections = dict(_state["retriever"].collections)
-
-    try:
-        import sys
-        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from db.database import get_db
-        db = get_db()
-        db_papers = db.count_papers()
-    except Exception:
-        pass
+        db_papers = len(_state["retriever"].papers_meta)
 
     return HealthResponse(
         status="healthy",

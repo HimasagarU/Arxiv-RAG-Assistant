@@ -35,16 +35,29 @@ class Reranker:
 
     def __init__(
         self,
-        model_name: str = "BAAI/bge-reranker-large",
+        model_name: str = "BAAI/bge-reranker-base",
         device: Optional[str] = None,
-        batch_size: int = 32,
+        batch_size: int = 16,
     ):
         self.batch_size = batch_size
         self.model_name = _normalize_hf_model_name(model_name)
         self.device = device
+        self.ranker = None
+
+        enable_reranker = os.getenv("ENABLE_RERANKER", "true").lower() == "true"
+        if not enable_reranker:
+            log.info("Reranker is explicitly disabled via ENABLE_RERANKER=false")
+            return
+
         log.info(f"Loading CrossEncoder reranker model: {self.model_name}")
-        self.ranker = CrossEncoder(self.model_name, device=self.device)
-        log.info("CrossEncoder reranker model loaded.")
+        try:
+            self.ranker = CrossEncoder(self.model_name, device=self.device)
+            log.info("CrossEncoder loaded. Running warmup...")
+            self.ranker.predict([("warmup", "warmup")])
+            log.info("Reranker ready.")
+        except Exception as e:
+            log.error(f"Failed to load reranker model {self.model_name}: {e}")
+            log.warning("System will fall back to fusion scores (no reranking).")
 
     def rerank(
         self,
@@ -71,6 +84,12 @@ class Reranker:
         """
         if not passages:
             return []
+            
+        if self.ranker is None:
+            # Fallback if reranker is disabled or failed to load
+            for p in passages[:top_n]:
+                p["rerank_score"] = p.get("fusion_score", 0.0)
+            return passages[:top_n]
 
         # Pass more candidates through the reranker than requested
         rerank_pool_size = min(len(passages), top_n * 3)

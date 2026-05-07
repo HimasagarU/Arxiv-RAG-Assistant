@@ -12,6 +12,7 @@ import math
 import os
 import sys
 import time
+import psutil
 
 from dotenv import load_dotenv
 
@@ -113,6 +114,9 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
     results.update({f"precision@{k}": [] for k in k_values})
     results.update({f"ndcg@{k}": [] for k in k_values})
     results["mrr"] = []
+    results["dense_ms"] = []
+    results["lex_ms"] = []
+    results["rerank_ms"] = []
     per_query = []
 
     for q in queries:
@@ -121,13 +125,24 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
 
         if retrieval_fn:
             start = time.time()
-            retrieved = retrieval_fn(query_text)
+            retrieved, trace = retrieval_fn(query_text)
             latency_ms = (time.time() - start) * 1000
         else:
             retrieved = []
+            trace = {}
             latency_ms = 0
 
-        qr = {"query": query_text, "latency_ms": latency_ms}
+        qr = {
+            "query": query_text, 
+            "latency_ms": latency_ms,
+            "dense_ms": trace.get("dense_ms", 0),
+            "lex_ms": trace.get("lex_ms", 0),
+            "rerank_ms": trace.get("rerank_ms", 0),
+        }
+
+        results["dense_ms"].append(trace.get("dense_ms", 0))
+        results["lex_ms"].append(trace.get("lex_ms", 0))
+        results["rerank_ms"].append(trace.get("rerank_ms", 0))
 
         for k in k_values:
             r_at_k = recall_at_k(retrieved, relevant, k)
@@ -170,6 +185,18 @@ def print_results(aggregated: dict, per_query: list):
         if latencies:
             print(f"\n  {'avg_latency_ms':20s}: {sum(latencies)/len(latencies):.1f}")
             print(f"  {'p95_latency_ms':20s}: {sorted(latencies)[int(len(latencies)*0.95)]:.1f}")
+        
+        dense = [q["dense_ms"] for q in per_query if "dense_ms" in q]
+        if dense:
+            print(f"  {'avg_dense_ms':20s}: {sum(dense)/len(dense):.1f}")
+        
+        lex = [q["lex_ms"] for q in per_query if "lex_ms" in q]
+        if lex:
+            print(f"  {'avg_lex_ms':20s}: {sum(lex)/len(lex):.1f}")
+            
+        rerank = [q["rerank_ms"] for q in per_query if "rerank_ms" in q]
+        if rerank:
+            print(f"  {'avg_rerank_ms':20s}: {sum(rerank)/len(rerank):.1f}")
 
     print("=" * 60 + "\n")
 
@@ -193,12 +220,20 @@ def main():
 
     from api.retrieval import HybridRetriever
     
+    process = psutil.Process(os.getpid())
+    mem_before = process.memory_info().rss / (1024 * 1024)
+    log.info(f"Memory before retriever init: {mem_before:.1f} MB")
+    
     log.info("Loading Hybrid Retriever...")
     retriever = HybridRetriever()
     
+    mem_after = process.memory_info().rss / (1024 * 1024)
+    log.info(f"Memory after retriever init: {mem_after:.1f} MB")
+    log.info(f"Artifact Memory Footprint: {mem_after - mem_before:.1f} MB")
+    
     def retrieval_fn(q):
         res = retriever.retrieve(q, top_n=20)
-        return [p["chunk_id"] for p in res["passages"]]
+        return [p["chunk_id"] for p in res["passages"]], res["trace"]
         
     aggregated, per_query = evaluate_retrieval(args.queries, retrieval_fn=retrieval_fn)
     print_results(aggregated, per_query)

@@ -22,14 +22,16 @@ import numpy as np
 from dotenv import load_dotenv
 import torch
 from sentence_transformers import SentenceTransformer
+import joblib
+import json
+from pathlib import Path
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, SearchParams
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rerank.reranker import Reranker
-from db.database import get_db
 
 load_dotenv()
 
@@ -156,16 +158,43 @@ class HybridRetriever:
         # Reranker
         self.reranker = Reranker(model_name=reranker_model)
 
-        # Database reference
-        self._db = None
+        # Artifacts
+        data_dir = Path(os.getenv("DATA_DIR", "data"))
+        self.bm25 = None
+        self.chunks_meta = []
+        self.chunks_text = {}
+        self.papers_meta = {}
+        
+        try:
+            with open(data_dir / "papers_meta.json", "r", encoding="utf-8") as f:
+                self.papers_meta = json.load(f)
+            log.info(f"Loaded {len(self.papers_meta)} papers from papers_meta.json")
+        except Exception as e:
+            log.warning(f"Could not load papers_meta.json: {e}")
+            
+        try:
+            with open(data_dir / "chunks_meta.jsonl", "r", encoding="utf-8") as f:
+                self.chunks_meta = [json.loads(line) for line in f]
+            log.info(f"Loaded {len(self.chunks_meta)} chunk metadata entries.")
+        except Exception as e:
+            log.warning(f"Could not load chunks_meta.jsonl: {e}")
+            
+        try:
+            self.bm25 = joblib.load(data_dir / "bm25_v1.pkl")
+            log.info("BM25 index loaded successfully.")
+        except Exception as e:
+            log.warning(f"Could not load bm25_v1.pkl: {e}")
+            
+        try:
+            with open(data_dir / "chunks_text.jsonl", "r", encoding="utf-8") as f:
+                for line in f:
+                    entry = json.loads(line)
+                    self.chunks_text[entry["chunk_id"]] = entry.get("text", "")
+            log.info(f"Loaded texts for {len(self.chunks_text)} chunks.")
+        except Exception as e:
+            log.warning(f"Could not load chunks_text.jsonl: {e}")
 
         log.info("HybridRetriever ready.")
-
-    @property
-    def db(self):
-        if self._db is None:
-            self._db = get_db()
-        return self._db
 
     # ------------------------------------------------------------------
     # Dense retrieval (Qdrant multi-collection)
@@ -197,25 +226,27 @@ class HybridRetriever:
             return []
 
         try:
-            results = self.qdrant_client.search(
+            res = self.qdrant_client.query_points(
                 collection_name=collection_name,
-                query_vector=query_embedding,
+                query=query_embedding,
                 query_filter=qdrant_filter,
                 limit=n_results,
-                search_params={"ef": QDRANT_SEARCH_EF},
+                search_params=SearchParams(hnsw_ef=QDRANT_SEARCH_EF),
                 with_payload=True,
             )
+            results = res.points
         except Exception as e:
             log.warning(f"Qdrant search failed on {collection_name}: {e}")
             if qdrant_filter:
                 try:
-                    results = self.qdrant_client.search(
+                    res = self.qdrant_client.query_points(
                         collection_name=collection_name,
-                        query_vector=query_embedding,
+                        query=query_embedding,
                         limit=n_results,
-                        search_params={"ef": QDRANT_SEARCH_EF},
+                        search_params=SearchParams(hnsw_ef=QDRANT_SEARCH_EF),
                         with_payload=True,
                     )
+                    results = res.points
                 except Exception:
                     return []
             else:
@@ -264,32 +295,59 @@ class HybridRetriever:
         author: Optional[str] = None,
         start_year: Optional[int] = None,
     ) -> list[dict]:
-        rows = self.db.search_chunks_fts(
-            query,
-            limit=self.k_lex,
-            category=category,
-            author=author,
-            start_year=start_year,
-        )
+        if not self.bm25 or not self.chunks_meta:
+            return []
+            
+        tokens = re.sub(r'[^\w\s]', '', query.lower()).split()
+        if not tokens:
+            return []
+            
+        scores = self.bm25.get_scores(tokens)
+        
+        # Fast top-K selection
+        k = min(self.k_lex * 5, len(scores))
+        if k == 0:
+            return []
+        top_indices = np.argpartition(scores, -k)[-k:]
+        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
 
         candidates = []
-        for row in rows:
+        for idx in top_indices:
+            if scores[idx] <= 0:
+                continue
+            meta = self.chunks_meta[idx]
+            paper_id = meta.get("paper_id", "")
+            
+            if category and category.lower() not in meta.get("categories", "").lower():
+                continue
+            if author and author.lower() not in meta.get("authors", "").lower():
+                continue
+            if start_year:
+                paper_info = self.papers_meta.get(paper_id, {})
+                published = paper_info.get("published")
+                if not published or int(published.split("-")[0]) < start_year:
+                    continue
+                    
+            chunk_id = meta["chunk_id"]
             candidates.append({
-                "chunk_id": row["chunk_id"],
-                "chunk_text": row.get("chunk_text", ""),
-                "lex_score": float(row.get("lexical_score", 0.0)),
-                "chunk_type": row.get("chunk_type", "text"),
+                "chunk_id": chunk_id,
+                "chunk_text": self.chunks_text.get(chunk_id, ""),
+                "lex_score": float(scores[idx]),
+                "chunk_type": meta.get("chunk_type", "text"),
                 "metadata": {
-                    "paper_id": row.get("paper_id", ""),
-                    "title": row.get("title", row.get("paper_title", "")),
-                    "authors": row.get("authors", row.get("paper_authors", "")),
-                    "categories": row.get("categories", row.get("paper_categories", "")),
-                    "section_hint": row.get("section_hint", "other"),
-                    "layer": row.get("layer", "core"),
-                    "chunk_source": row.get("chunk_source", "full_text"),
+                    "paper_id": paper_id,
+                    "title": meta.get("title", ""),
+                    "authors": meta.get("authors", ""),
+                    "categories": meta.get("categories", ""),
+                    "section_hint": meta.get("section_hint", "other"),
+                    "layer": meta.get("layer", "core"),
+                    "chunk_source": meta.get("chunk_source", "full_text"),
                 },
                 "source": "lexical",
             })
+            if len(candidates) >= self.k_lex:
+                break
+                
         return candidates
 
     # ------------------------------------------------------------------
@@ -372,12 +430,12 @@ class HybridRetriever:
             paper_id = candidate.get("metadata", {}).get("paper_id", "")
             if not paper_id:
                 continue
-            try:
-                row = self.db.get_paper(paper_id)
-                published = row.get("published") if row else None
-                if published and published.year >= start_year:
+            paper_info = self.papers_meta.get(paper_id)
+            if paper_info:
+                published = paper_info.get("published")
+                if published and int(published.split("-")[0]) >= start_year:
                     filtered.append(candidate)
-            except Exception:
+            else:
                 filtered.append(candidate)
         return filtered
 
@@ -624,12 +682,13 @@ class HybridRetriever:
             mean_emb = mean_emb / np.linalg.norm(mean_emb)
 
             # Search for similar
-            results = self.qdrant_client.search(
+            res = self.qdrant_client.query_points(
                 collection_name=COLLECTION_TEXT,
-                query_vector=mean_emb.tolist(),
+                query=mean_emb.tolist(),
                 limit=top_n * 5,
                 with_payload=True,
             )
+            results = res.points
 
             seen = {paper_id}
             papers = []

@@ -9,13 +9,13 @@ Seed Papers (15 curated mech interp papers)
   → Citation Expansion (Semantic Scholar API)
   → Keyword Gap-Filling (arXiv API)
   → Timeline Balancing (early / middle / recent eras)
-  → PostgreSQL (papers, chunks, citation_edges)
+  → PostgreSQL (offline ingestion & processing only)
   → PDF Download + Full Text Extraction (PyMuPDF)
-  → Full-Text Chunking (overlapping token windows)
+  → Artifact Builder (exports BM25 + metadata to joblib/jsonl)
   → Qdrant Cloud (dense vector index, BGE-large-en-v1.5)
-  → PostgreSQL FTS (lexical retrieval via tsvector)
+  → In-Memory BM25 (lexical retrieval via rank_bm25)
   → Intent-Aware Hybrid Retrieval (RRF fusion)
-  → Cross-Encoder Reranking (BGE-reranker-large)
+  → Cross-Encoder Reranking (BGE-reranker-base)
   → LLM Answer Generation (Groq / Llama 3.3 70B)
 ```
 
@@ -31,10 +31,10 @@ Seed Papers (15 curated mech interp papers)
 
 ### Hybrid Retrieval Pipeline
 - **Dense retrieval**: Qdrant Cloud with BGE-large-en-v1.5 embeddings (1024-dim, HNSW m=32)
-- **Lexical retrieval**: PostgreSQL full-text search with weighted tsvector (title/categories/authors/text)
+- **Lexical retrieval**: In-memory `rank_bm25` index (BM25Okapi) loaded from local artifacts
 - **RRF fusion**: Intent-aware Reciprocal Rank Fusion with per-intent weight tuning
-- **Cross-encoder reranking**: BGE-reranker-large with combined title+text mode for explanatory queries
-- **Paper diversity**: Max 2 chunks per paper to ensure breadth across sources
+- **Cross-encoder reranking**: BAAI/bge-reranker-base on CPU (with automatic fallback to RRF scores)
+- **Memory Optimized**: Chunk texts are decoupled from metadata for low-RAM deployments
 
 ### Intent-Aware Query Processing
 - **5 query intents**: explanatory, comparative, technical, sota, discovery
@@ -53,53 +53,49 @@ Seed Papers (15 curated mech interp papers)
 ```
 db/
   schema.sql              PostgreSQL schema (papers, chunks, citation_edges)
-  database.py             Connection manager + CRUD + FTS search
+  database.py             Connection manager + CRUD
 ingest/
   ingest_arxiv.py         Seed + keyword ingestion with relevance filter
   citation_expander.py    Semantic Scholar citation expansion
   timeline_balancer.py    Era distribution checker + gap filler
   chunking.py             Full-text chunking with section detection
-  r2_storage.py           Cloudflare R2 artifact storage
 storage/
   local_pdf_store.py      Local PDF cache management
 index/
   build_qdrant.py         Qdrant Cloud vector index builder
+  build_bm25.py           BM25 artifact builder (joblib, jsonl)
   params.yaml             Pipeline configuration
 api/
   app.py                  FastAPI server with streaming + non-streaming endpoints
-  retrieval.py            Hybrid retrieval (dense + FTS + RRF + reranking)
-  fetch_data.py           R2 data fetching for deployment
+  retrieval.py            Hybrid retrieval (dense + BM25 + RRF + reranking)
+  fetch_data.py           Cloudflare R2 artifact bootstrapper
   entrypoint.sh           Docker entrypoint script
 rerank/
-  reranker.py             Cross-encoder reranking (BGE-reranker-large)
-  evaluate.py             Retrieval evaluation metrics (Recall, MRR, nDCG)
+  reranker.py             Cross-encoder reranking (BGE-reranker-base)
+  evaluate.py             Retrieval evaluation metrics (Recall, MRR, latency, RAM)
 frontend/
   index.html              Web UI (single-page, academic theme)
+data/                     (Generated) Artifacts and metadata mapping
 scripts/
-  run_mech_interp_pipeline.bat   Full pipeline script
-  run_index.bat                  Index build script
-  rebuild_indexes.bat            Rebuild indexes script
+  upload_artifacts.py     Cloudflare R2 artifact uploader
+  run_mech_interp_pipeline.bat
 tests/
   test_eval.py            Unit + integration tests
-  queries.jsonl           Evaluation queries
 ```
 
 ## Setup
 
 ### Prerequisites
 - Python 3.10+
-- PostgreSQL 14+ (or Neon for cloud deployment)
 - Qdrant Cloud cluster
 - Groq API key (for LLM generation)
+- Cloudflare R2 bucket (for artifact storage)
 
 ### 1. Environment Variables
 
 Copy `.env.example` to `.env` and configure:
 
 ```env
-# Database
-DATABASE_URL=postgresql://user:password@localhost:5432/arxiv_rag
-
 # Vector Database
 QDRANT_URL=https://your-cluster.qdrant.io
 QDRANT_API_KEY=your_qdrant_api_key
@@ -152,8 +148,9 @@ python ingest/ingest_arxiv.py --mode enrich --pdf-timeout 60
 # Step 6: Chunk full text
 python ingest/chunking.py --source auto --reset
 
-# Step 7: Build Qdrant vector index (FTS is automatic via PostgreSQL)
+# Step 7: Build vector and BM25 indexes
 python index/build_qdrant.py
+python index/build_bm25.py
 ```
 
 ### 4. Start API
@@ -179,22 +176,21 @@ docker compose up -d
 | `GET` | `/health` | Health check with collection counts + cache stats |
 | `GET` | `/keep-alive` | Lightweight ping for uptime monitoring |
 
-## PostgreSQL Schema
+## Hugging Face Spaces Deployment
 
-| Table | Description |
-|-------|-------------|
-| `papers` | Paper metadata with `is_seed`, `layer`, `source`, `semantic_scholar_id` fields |
-| `chunks` | Retrieval units with `search_tsv` (auto-generated tsvector for FTS), section hints, layer metadata |
-| `citation_edges` | Citation graph (reference/citation edges between seed papers and expanded corpus) |
+The API is fully optimized for **stateless deployment** on Hugging Face Spaces (or Render) free CPU tiers:
+- Uses `rank_bm25` loaded in-memory instead of PostgreSQL FTS.
+- Idempotent `.sha256` checksum artifact download via `fetch_data.py` on cold starts.
+- Model pre-warming during asynchronous background initialization so the `/health` probe passes instantly.
 
 ## Retrieval Pipeline Details
 
-### Dense + FTS Hybrid Search
-1. **Dense**: Query encoded with BGE-large-en-v1.5 → Qdrant ANN search (ef=200)
-2. **Lexical**: PostgreSQL `websearch_to_tsquery` with weighted tsvector ranking
+### Dense + BM25 Hybrid Search
+1. **Dense**: Query encoded with BGE-large-en-v1.5 → Qdrant ANN search
+2. **Lexical**: In-memory `rank_bm25` index using punctuation-stripped tokenization
 3. **Fusion**: Reciprocal Rank Fusion with intent-aware weights
 4. **Diversity**: Max 2 chunks per paper, layer-aware balancing
-5. **Reranking**: BGE-reranker-large cross-encoder (top 3×N candidates → top N)
+5. **Reranking**: BGE-reranker-base cross-encoder (graceful fallback if memory fails)
 
 ### Intent-Aware Weights (dense, lexical)
 | Intent | Dense | Lexical | Rationale |
