@@ -32,6 +32,6 @@ RUN mkdir -p /app/data
 # Make entrypoint executable
 RUN chmod +x api/entrypoint.sh
 
-EXPOSE 8000
+EXPOSE 7860
 
 ENTRYPOINT ["/app/api/entrypoint.sh"]
