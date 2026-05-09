@@ -1,16 +1,11 @@
----
-title: Arxiv RAG Assistant
-emoji: 📚
-colorFrom: red
-colorTo: red
-sdk: docker
-pinned: false
----
 # ArXiv RAG Assistant — Mechanistic Interpretability
 
 A production-grade **Retrieval-Augmented Generation (RAG)** system specialized for **mechanistic interpretability** research. Built around a curated corpus of transformer circuits, sparse autoencoders, activation patching, and related papers spanning 2017–2025.
 
 ## Architecture
+
+> [!TIP]
+> **[View the Complete End-to-End System Architecture details here](ARCHITECTURE.md)**
 
 ```
 Seed Papers (15 curated mech interp papers)
@@ -23,7 +18,7 @@ Seed Papers (15 curated mech interp papers)
   → Qdrant Cloud (dense vector index, BGE-large-en-v1.5)
   → In-Memory BM25 (lexical retrieval via rank_bm25)
   → Intent-Aware Hybrid Retrieval (RRF fusion)
-  → Cross-Encoder Reranking (BGE-reranker-base)
+  → Cross-Encoder Reranking (ms-marco-MiniLM-L-6-v2)
   → LLM Answer Generation (Groq / Llama 3.3 70B)
 ```
 
@@ -41,7 +36,7 @@ Seed Papers (15 curated mech interp papers)
 - **Dense retrieval**: Qdrant Cloud with BGE-large-en-v1.5 embeddings (1024-dim, HNSW m=32)
 - **Lexical retrieval**: In-memory `rank_bm25` index (BM25Okapi) loaded from local artifacts
 - **RRF fusion**: Intent-aware Reciprocal Rank Fusion with per-intent weight tuning
-- **Cross-encoder reranking**: BAAI/bge-reranker-base on CPU (with automatic fallback to RRF scores)
+- **Cross-encoder reranking**: cross-encoder/ms-marco-MiniLM-L-6-v2 on CPU (with automatic fallback to RRF scores)
 - **Memory Optimized**: Chunk texts are decoupled from metadata for low-RAM deployments
 
 ### Intent-Aware Query Processing
@@ -79,7 +74,7 @@ api/
   fetch_data.py           Cloudflare R2 artifact bootstrapper
   entrypoint.sh           Docker entrypoint script
 rerank/
-  reranker.py             Cross-encoder reranking (BGE-reranker-base)
+  reranker.py             Cross-encoder reranking (ms-marco-MiniLM-L-6-v2)
   evaluate.py             Retrieval evaluation metrics (Recall, MRR, latency, RAM)
 frontend/
   index.html              Web UI (single-page, academic theme)
@@ -120,7 +115,7 @@ R2_ENDPOINT=https://....r2.cloudflarestorage.com
 
 # Models
 EMBEDDING_MODEL=BAAI/bge-large-en-v1.5
-RERANKER_MODEL=BAAI/bge-reranker-large
+RERANKER_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
 ```
 
 ### 2. Install Dependencies
@@ -198,7 +193,7 @@ The API is fully optimized for **stateless deployment** on Hugging Face Spaces (
 2. **Lexical**: In-memory `rank_bm25` index using punctuation-stripped tokenization
 3. **Fusion**: Reciprocal Rank Fusion with intent-aware weights
 4. **Diversity**: Max 2 chunks per paper, layer-aware balancing
-5. **Reranking**: BGE-reranker-base cross-encoder (graceful fallback if memory fails)
+5. **Reranking**: ms-marco-MiniLM-L-6-v2 cross-encoder (graceful fallback if memory fails)
 
 ### Intent-Aware Weights (dense, lexical)
 | Intent | Dense | Lexical | Rationale |
