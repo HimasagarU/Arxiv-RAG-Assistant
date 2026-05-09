@@ -8,11 +8,6 @@ The ArXiv RAG Assistant is a specialized, production-grade Retrieval-Augmented G
 
 ```mermaid
 flowchart TD
-    %% Define Styles
-    classDef offline fill:#eef2ff,stroke:#6366f1,stroke-width:2px;
-    classDef live fill:#f0fdf4,stroke:#22c55e,stroke-width:2px;
-    classDef frontend fill:#fff7ed,stroke:#f97316,stroke-width:2px;
-
     %% Offline Pipeline
     subgraph Offline [Offline Ingestion Pipeline]
         A[Seed Papers & arXiv Keywords] --> B(Semantic Scholar Citation Expansion)
@@ -22,7 +17,6 @@ flowchart TD
         E --> F1[(Qdrant Cloud Dense Index)]
         E --> F2[(BM25 Artifacts)]
     end
-    class Offline offline
 
     %% Live API Pipeline
     subgraph Live [Live Backend API]
@@ -34,7 +28,6 @@ flowchart TD
         J --> K(Context Compression)
         K --> L[Groq / Llama 3.3 70B]
     end
-    class Live live
 
     %% Frontend
     subgraph Frontend [Web UI]
@@ -43,7 +36,6 @@ flowchart TD
         L -. SSE Stream .-> N
         N --> O((Answers & Citations))
     end
-    class Frontend frontend
 ```
 
 ---

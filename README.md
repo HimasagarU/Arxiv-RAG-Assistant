@@ -9,11 +9,6 @@ A production-grade **Retrieval-Augmented Generation (RAG)** system specialized f
 
 ```mermaid
 flowchart TD
-    %% Define Styles
-    classDef offline fill:#eef2ff,stroke:#6366f1,stroke-width:2px;
-    classDef live fill:#f0fdf4,stroke:#22c55e,stroke-width:2px;
-    classDef frontend fill:#fff7ed,stroke:#f97316,stroke-width:2px;
-
     %% Offline Pipeline
     subgraph Offline [Offline Ingestion Pipeline]
         A[Seed Papers & arXiv Keywords] --> B(Semantic Scholar Citation Expansion)
@@ -23,7 +18,6 @@ flowchart TD
         E --> F1[(Qdrant Cloud Dense Index)]
         E --> F2[(BM25 Artifacts)]
     end
-    class Offline offline
 
     %% Live API Pipeline
     subgraph Live [Live Backend API]
@@ -35,7 +29,6 @@ flowchart TD
         J --> K(Context Compression)
         K --> L[Groq / Llama 3.3 70B]
     end
-    class Live live
 
     %% Frontend
     subgraph Frontend [Web UI]
@@ -44,7 +37,6 @@ flowchart TD
         L -. SSE Stream .-> N
         N --> O((Answers & Citations))
     end
-    class Frontend frontend
 ```
 
 ## Key Features
@@ -211,23 +203,6 @@ The API is fully optimized for **stateless deployment** on Hugging Face Spaces (
 - Idempotent `.sha256` checksum artifact download via `fetch_data.py` on cold starts.
 - Model pre-warming during asynchronous background initialization so the `/health` probe passes instantly.
 
-## Retrieval Pipeline Details
-
-### Dense + BM25 Hybrid Search
-1. **Dense**: Query encoded with BGE-large-en-v1.5 → Qdrant ANN search
-2. **Lexical**: In-memory `rank_bm25` index using punctuation-stripped tokenization
-3. **Fusion**: Reciprocal Rank Fusion with intent-aware weights
-4. **Diversity**: Max 2 chunks per paper, layer-aware balancing
-5. **Reranking**: ms-marco-MiniLM-L-6-v2 cross-encoder (graceful fallback if memory fails)
-
-### Intent-Aware Weights (dense, lexical)
-| Intent | Dense | Lexical | Rationale |
-|--------|-------|---------|-----------|
-| Explanatory | 0.7 | 0.3 | Concept queries favor semantic similarity |
-| Comparative | 0.6 | 0.4 | Balanced for multi-topic comparison |
-| Technical | 0.5 | 0.5 | Equations/formulas need both signals |
-| SOTA | 0.7 | 0.3 | Research trends favor semantic |
-| Discovery | 0.4 | 0.6 | Keyword-heavy queries favor FTS |
 
 ## Layer Tags
 
