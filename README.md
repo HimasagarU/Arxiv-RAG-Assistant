@@ -7,19 +7,44 @@ A production-grade **Retrieval-Augmented Generation (RAG)** system specialized f
 > [!TIP]
 > **[View the Complete End-to-End System Architecture details here](ARCHITECTURE.md)**
 
-```
-Seed Papers (15 curated mech interp papers)
-  → Citation Expansion (Semantic Scholar API)
-  → Keyword Gap-Filling (arXiv API)
-  → Timeline Balancing (early / middle / recent eras)
-  → PostgreSQL (offline ingestion & processing only)
-  → PDF Download + Full Text Extraction (PyMuPDF)
-  → Artifact Builder (exports BM25 + metadata to joblib/jsonl)
-  → Qdrant Cloud (dense vector index, BGE-large-en-v1.5)
-  → In-Memory BM25 (lexical retrieval via rank_bm25)
-  → Intent-Aware Hybrid Retrieval (RRF fusion)
-  → Cross-Encoder Reranking (ms-marco-MiniLM-L-6-v2)
-  → LLM Answer Generation (Groq / Llama 3.3 70B)
+```mermaid
+flowchart TD
+    %% Define Styles
+    classDef offline fill:#eef2ff,stroke:#6366f1,stroke-width:2px;
+    classDef live fill:#f0fdf4,stroke:#22c55e,stroke-width:2px;
+    classDef frontend fill:#fff7ed,stroke:#f97316,stroke-width:2px;
+
+    %% Offline Pipeline
+    subgraph Offline [Offline Ingestion Pipeline]
+        A[Seed Papers & arXiv Keywords] --> B(Semantic Scholar Citation Expansion)
+        B --> C[PostgreSQL Data Warehouse]
+        C --> D(PyMuPDF Full Text Extraction)
+        D --> E(Text Chunking & Normalization)
+        E --> F1[(Qdrant Cloud Dense Index)]
+        E --> F2[(BM25 Artifacts)]
+    end
+    class Offline offline
+
+    %% Live API Pipeline
+    subgraph Live [Live Backend API]
+        G(Query Intent Classifier) --> H[Hybrid Retriever]
+        F1 -.-> H
+        F2 -.-> H
+        H --> I(Reciprocal Rank Fusion)
+        I --> J(Cross-Encoder Reranker)
+        J --> K(Context Compression)
+        K --> L[Groq / Llama 3.3 70B]
+    end
+    class Live live
+
+    %% Frontend
+    subgraph Frontend [Web UI]
+        M((User Query)) --> N{FastAPI Server}
+        N --> G
+        L -. SSE Stream .-> N
+        N --> O((Answers & Citations))
+    end
+    class Frontend frontend
 ```
 
 ## Key Features

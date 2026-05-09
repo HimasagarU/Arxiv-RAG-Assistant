@@ -21,11 +21,8 @@ def _normalize_hf_model_name(model_name: str) -> str:
     """
     Ensure the model name is properly formatted for HuggingFace.
     If no namespace is provided, add 'cross-encoder/'.
-    BGE reranker models use 'BAAI/' namespace.
     """
     if "/" not in model_name:
-        if "bge-reranker" in model_name.lower():
-            return f"BAAI/{model_name}"
         return f"cross-encoder/{model_name}"
     return model_name
 
