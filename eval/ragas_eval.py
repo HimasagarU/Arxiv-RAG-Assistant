@@ -104,7 +104,7 @@ def _run_query_api(question: str, api_url: str, top_k: int = 5) -> dict:
 # RAGAS evaluation
 # ---------------------------------------------------------------------------
 
-async def evaluate_with_ragas(records: list[dict], evaluator_llm) -> list[dict]:
+async def evaluate_with_ragas(records: list[dict], evaluator_llm, output_path: str = None, existing_scored: list = None) -> list[dict]:
     """Score each record with RAGAS reference-free metrics.
     
     Note: ResponseRelevancy uses n>1 generation which Groq does not support.
@@ -161,6 +161,21 @@ async def evaluate_with_ragas(records: list[dict], evaluator_llm) -> list[dict]:
             "context_precision": ctx_prec_score,
         }
         scored.append(rec)
+        
+        # Incremental save so we never lose progress if the script crashes
+        if output_path and existing_scored is not None:
+            combined_scored = [r for r in existing_scored if r["question"] not in [n["question"] for n in scored]]
+            combined_scored.extend(scored)
+            
+            # Make a copy and strip trace for saving
+            save_data = []
+            for item in combined_scored:
+                item_copy = dict(item)
+                item_copy.pop("trace", None)
+                save_data.append(item_copy)
+                
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump({"scored": save_data, "total_queries": len(save_data)}, f, indent=2, default=str)
 
     if not relevancy_supported:
         log.info("  ℹ️  response_relevancy was skipped (Groq does not support n>1).")
@@ -329,21 +344,20 @@ def main():
     llm = ChatGroq(model=args.llm_model, api_key=groq_api_key, temperature=0)
     evaluator_llm = LangchainLLMWrapper(llm)
 
-    new_scored = asyncio.run(evaluate_with_ragas(records, evaluator_llm))
+    new_scored = asyncio.run(evaluate_with_ragas(records, evaluator_llm, output_path, existing_scored))
 
-    # Strip non-serializable trace data
+    # Strip non-serializable trace data for the final combined list
     for rec in new_scored:
         rec.pop("trace", None)
 
-    # ── Step 3: Combine and Save ──
-    # Replace any existing failed records with the new successful ones
+    # ── Step 3: Combine and Save (Final) ──
     combined_scored = [r for r in existing_scored if r["question"] not in [n["question"] for n in new_scored]]
     combined_scored.extend(new_scored)
 
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump({"scored": combined_scored, "total_queries": len(combined_scored)}, f, indent=2, default=str)
 
-    log.info(f"Results saved → {output_path}")
+    log.info(f"Final results safely stored → {output_path}")
 
     # ── Step 4: Report ──
     print_summary(combined_scored)
