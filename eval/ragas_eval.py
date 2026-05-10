@@ -271,60 +271,80 @@ def main():
 
     # Load existing results for resume capability
     existing_scored = []
-    evaluated_questions = set()
+    fully_evaluated_questions = set()
+    answered_records = {}
+    
     if not args.restart and os.path.exists(output_path):
         try:
             with open(output_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 existing_scored = data.get("scored", [])
                 for rec in existing_scored:
+                    answered_records[rec["question"]] = rec
                     ragas_scores = rec.get("ragas", {})
                     # If it has a faithfulness score, we consider it successfully evaluated
                     if ragas_scores.get("faithfulness") is not None:
-                        evaluated_questions.add(rec["question"])
+                        fully_evaluated_questions.add(rec["question"])
         except Exception as e:
             log.warning(f"Could not load existing results: {e}")
 
-    remaining_questions = [q for q in questions if q["question"] not in evaluated_questions]
+    questions_needing_answers = [q for q in questions if q["question"] not in answered_records]
+    records_needing_eval = [answered_records[q["question"]] for q in questions if q["question"] in answered_records and q["question"] not in fully_evaluated_questions]
 
     log.info(f"Loaded {len(questions)} total questions.")
-    if evaluated_questions:
-        log.info(f"  {len(evaluated_questions)} already evaluated. {len(remaining_questions)} remaining.")
+    if answered_records:
+        log.info(f"  {len(fully_evaluated_questions)} fully evaluated. {len(records_needing_eval)} have answers but need evaluation. {len(questions_needing_answers)} need answers.")
 
-    if not remaining_questions:
+    if not questions_needing_answers and not records_needing_eval:
         log.info("All questions have already been evaluated! Use --restart to start over.")
         print_summary(existing_scored)
         return
 
     # ── Step 1: Run queries through the pipeline ──
     log.info("Step 1: Running queries through RAG pipeline...")
-    records = []
+    
+    def _save_intermediate(new_rec):
+        combined = [r for r in existing_scored if r["question"] != new_rec["question"]]
+        combined.append(new_rec)
+        existing_scored.clear()
+        existing_scored.extend(combined)
+        
+        save_data = []
+        for item in existing_scored:
+            item_copy = dict(item)
+            item_copy.pop("trace", None)
+            save_data.append(item_copy)
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump({"scored": save_data, "total_queries": len(save_data)}, f, indent=2, default=str)
 
-    if args.api_url:
-        log.info(f"  Using deployed API: {args.api_url}")
-        for i, q in enumerate(remaining_questions):
-            log.info(f"  [{i+1}/{len(remaining_questions)}] {q['question'][:60]}...")
-            try:
-                rec = _run_query_api(q["question"], args.api_url)
-                rec["intent"] = q.get("intent", rec.get("intent", "discovery"))
-                records.append(rec)
-            except Exception as e:
-                log.error(f"  API call failed: {e}")
-    else:
-        log.info("  Using local retriever...")
-        from api.retrieval import HybridRetriever
-        retriever = HybridRetriever()
+    if questions_needing_answers:
+        if args.api_url:
+            log.info(f"  Using deployed API: {args.api_url}")
+            for i, q in enumerate(questions_needing_answers):
+                log.info(f"  [{i+1}/{len(questions_needing_answers)}] {q['question'][:60]}...")
+                try:
+                    rec = _run_query_api(q["question"], args.api_url)
+                    rec["intent"] = q.get("intent", rec.get("intent", "discovery"))
+                    records_needing_eval.append(rec)
+                    _save_intermediate(rec)
+                except Exception as e:
+                    log.error(f"  API call failed: {e}")
+        else:
+            log.info("  Using local retriever...")
+            from api.retrieval import HybridRetriever
+            retriever = HybridRetriever()
 
-        for i, q in enumerate(remaining_questions):
-            log.info(f"  [{i+1}/{len(remaining_questions)}] {q['question'][:60]}...")
-            try:
-                rec = _run_query_local(q["question"], retriever)
-                rec["intent"] = q.get("intent", rec.get("intent", "discovery"))
-                records.append(rec)
-            except Exception as e:
-                log.error(f"  Pipeline failed: {e}")
+            for i, q in enumerate(questions_needing_answers):
+                log.info(f"  [{i+1}/{len(questions_needing_answers)}] {q['question'][:60]}...")
+                try:
+                    rec = _run_query_local(q["question"], retriever)
+                    rec["intent"] = q.get("intent", rec.get("intent", "discovery"))
+                    records_needing_eval.append(rec)
+                    _save_intermediate(rec)
+                except Exception as e:
+                    log.error(f"  Pipeline failed: {e}")
 
-    if not records:
+    if not records_needing_eval:
         log.error("No new records were successfully generated to evaluate.")
         if existing_scored:
             print_summary(existing_scored)
@@ -344,7 +364,7 @@ def main():
     llm = ChatGroq(model=args.llm_model, api_key=groq_api_key, temperature=0)
     evaluator_llm = LangchainLLMWrapper(llm)
 
-    new_scored = asyncio.run(evaluate_with_ragas(records, evaluator_llm, output_path, existing_scored))
+    new_scored = asyncio.run(evaluate_with_ragas(records_needing_eval, evaluator_llm, output_path, existing_scored))
 
     # Strip non-serializable trace data for the final combined list
     for rec in new_scored:
