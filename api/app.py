@@ -1,11 +1,11 @@
-"""
-app.py — FastAPI application for the ArXiv RAG Assistant.
+﻿"""
+app.py â€” FastAPI application for the ArXiv RAG Assistant.
 
 Endpoints:
-    POST /query         — Hybrid retrieval + rerank + LLM answer generation
-    GET  /paper/{id}    — Paper metadata lookup
-    GET  /paper/{id}/similar — Find similar papers
-    GET  /health        — Health check with basic metrics
+    POST /query         â€” Hybrid retrieval + rerank + LLM answer generation
+    GET  /paper/{id}    â€” Paper metadata lookup
+    GET  /paper/{id}/similar â€” Find similar papers
+    GET  /health        â€” Health check with basic metrics
 
 Usage:
     conda run -n pytorch uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
@@ -17,12 +17,13 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -178,6 +179,11 @@ _state = {
     "query_count": 0,
 }
 
+_metrics = {
+    "request_latencies_ms": deque(maxlen=5000),
+    "query_latencies_ms": deque(maxlen=5000),
+}
+
 
 # ---------------------------------------------------------------------------
 # Lifespan
@@ -237,6 +243,16 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
+
+@app.middleware("http")
+async def request_timing_middleware(request, call_next):
+    """Track end-to-end request latency for all API routes."""
+    t0 = time.time()
+    response = await call_next(request)
+    elapsed_ms = (time.time() - t0) * 1000
+    _metrics["request_latencies_ms"].append(elapsed_ms)
+    return response
+
 # Serve frontend
 _frontend_dir = Path(__file__).resolve().parent.parent / "frontend"
 if _frontend_dir.is_dir():
@@ -244,7 +260,7 @@ if _frontend_dir.is_dir():
 
 
 # ---------------------------------------------------------------------------
-# Prompt builder — intent-aware templates
+# Prompt builder â€” intent-aware templates
 # ---------------------------------------------------------------------------
 
 def _build_sources_block(passages: list[dict]) -> str:
@@ -305,13 +321,13 @@ Your job is to give a balanced, evidence-based comparison grounded in the source
 
 CRITICAL RULES:
 1. Every claim must be supported by at least one source. Use citations [1], [2], etc.
-2. Be fair and balanced — present strengths and weaknesses of each side.
+2. Be fair and balanced â€” present strengths and weaknesses of each side.
 3. Do NOT fabricate benchmark numbers. Only cite numbers found in the sources.
 
 STRUCTURE YOUR ANSWER EXACTLY LIKE THIS:
 1. **Overview**: A 1-2 sentence summary of what is being compared. Start with double asterisks **like this**.
-2. **Approach A**: Summary of the first approach — key mechanism, strengths.
-3. **Approach B**: Summary of the second approach — key mechanism, strengths.
+2. **Approach A**: Summary of the first approach â€” key mechanism, strengths.
+3. **Approach B**: Summary of the second approach â€” key mechanism, strengths.
 4. **Key Differences**: A clear comparison of the main differences (use a list).
 5. **When to Use Each**: Practical guidance on when each approach is more appropriate.
 6. **References**: List the numbered source titles.
@@ -368,7 +384,7 @@ _SYSTEM_PROMPTS = {
         "You are an expert AI/ML research assistant. When explaining concepts, "
         "give clear step-by-step explanations grounded in source evidence. "
         "Start with a bold definition. Use numbered citations [1], [2]. "
-        "Never fabricate steps — if the sources don't cover something, say so."
+        "Never fabricate steps â€” if the sources don't cover something, say so."
     ),
     "comparative": (
         "You are an expert AI/ML research assistant. When comparing approaches, "
@@ -479,6 +495,63 @@ def log_query(query: str, response_data: dict):
         log.warning(f"Failed to log query: {e}")
 
 
+def _percentile(values: list[float], p: float) -> float:
+    """Return percentile with linear interpolation."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return float(ordered[0])
+    rank = (len(ordered) - 1) * p
+    low = int(rank)
+    high = min(low + 1, len(ordered) - 1)
+    weight = rank - low
+    return float(ordered[low] + (ordered[high] - ordered[low]) * weight)
+
+
+def _latency_summary(values: list[float]) -> dict:
+    """Build latency summary stats in milliseconds."""
+    if not values:
+        return {
+            "count": 0,
+            "avg_ms": 0.0,
+            "p50_ms": 0.0,
+            "p95_ms": 0.0,
+            "p99_ms": 0.0,
+            "max_ms": 0.0,
+        }
+    return {
+        "count": len(values),
+        "avg_ms": round(sum(values) / len(values), 1),
+        "p50_ms": round(_percentile(values, 0.50), 1),
+        "p95_ms": round(_percentile(values, 0.95), 1),
+        "p99_ms": round(_percentile(values, 0.99), 1),
+        "max_ms": round(max(values), 1),
+    }
+
+
+def _historical_query_latencies() -> list[float]:
+    """Read all historical /query latencies from logs/queries.jsonl."""
+    log_path = os.path.join(LOGS_DIR, "queries.jsonl")
+    if not os.path.isfile(log_path):
+        return []
+
+    latencies: list[float] = []
+    try:
+        with open(log_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                latency = row.get("latency_ms")
+                if isinstance(latency, (int, float)):
+                    latencies.append(float(latency))
+    except Exception as e:
+        log.warning(f"Failed to parse historical latency logs: {e}")
+    return latencies
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -489,7 +562,13 @@ async def root():
     index_file = _frontend_dir / "index.html"
     if index_file.is_file():
         return FileResponse(str(index_file))
-    return {"message": "ArXiv RAG API — visit /docs for Swagger UI"}
+    return {"message": "ArXiv RAG API - visit /docs for Swagger UI"}
+
+
+@app.head("/", include_in_schema=False)
+async def root_head():
+    """HEAD probe for frontend root."""
+    return Response(status_code=200)
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -505,7 +584,6 @@ async def query_endpoint(request: QueryRequest):
             detail="Retriever not initialized. Please ensure indexes are built.",
         )
 
-    # Check cache
     cache_key = query_cache._make_key(
         request.query, request.top_k, request.category,
         request.author, request.start_year
@@ -519,11 +597,9 @@ async def query_endpoint(request: QueryRequest):
     t0 = time.time()
     _state["query_count"] += 1
 
-    # Classify query intent (drives retrieval, compression, and prompt selection)
     from api.retrieval import classify_query_intent
     intent = classify_query_intent(request.query)
 
-    # Retrieve with filters + intent
     result = _state["retriever"].retrieve(
         request.query,
         top_n=request.top_k,
@@ -536,22 +612,20 @@ async def query_endpoint(request: QueryRequest):
     trace = result["trace"]
     analytics = result.get("analytics", {})
 
-    # Context compression — intent-aware
     t_compress = time.time()
     compressed_context = _state["retriever"].compress_context(
         request.query, passages, intent=intent
     )
     trace["compress_ms"] = round((time.time() - t_compress) * 1000, 1)
 
-    # Generate answer — intent-aware prompt and temperature
     t_gen = time.time()
     prompt = build_prompt(request.query, compressed_context, passages, intent=intent)
     answer = generate_answer(prompt, intent=intent)
     trace["generation_ms"] = round((time.time() - t_gen) * 1000, 1)
 
     total_ms = round((time.time() - t0) * 1000, 1)
+    _metrics["query_latencies_ms"].append(total_ms)
 
-    # Build response
     sources = [
         SourceInfo(
             chunk_id=p["chunk_id"],
@@ -574,7 +648,6 @@ async def query_endpoint(request: QueryRequest):
         "cached": False,
     }
 
-    # Cache the result
     cache_data = {
         "answer": answer,
         "sources": [s.model_dump() for s in sources],
@@ -585,7 +658,6 @@ async def query_endpoint(request: QueryRequest):
     }
     query_cache.set(cache_key, cache_data)
 
-    # Log query
     log_query(request.query, {
         "latency_ms": total_ms,
         "retrieval_trace": trace,
@@ -619,11 +691,9 @@ async def query_stream_endpoint(request: QueryRequest):
     t0 = time.time()
     _state["query_count"] += 1
 
-    # Classify query intent
     from api.retrieval import classify_query_intent
     intent = classify_query_intent(request.query)
 
-    # Retrieve with filters + intent
     result = _state["retriever"].retrieve(
         request.query,
         top_n=request.top_k,
@@ -636,15 +706,12 @@ async def query_stream_endpoint(request: QueryRequest):
     trace = result["trace"]
     analytics = result.get("analytics", {})
 
-    # Context compression — intent-aware
     compressed_context = _state["retriever"].compress_context(
         request.query, passages, intent=intent
     )
 
-    # Build intent-aware prompt
     prompt = build_prompt(request.query, compressed_context, passages, intent=intent)
 
-    # Build sources list
     sources = [
         {
             "chunk_id": p["chunk_id"],
@@ -672,7 +739,6 @@ async def query_stream_endpoint(request: QueryRequest):
         })
         yield f"data: {meta_payload}\n\n"
 
-        # Stream answer tokens — intent-aware
         try:
             for token in _generate_groq_stream(prompt, groq_api_key, intent=intent):
                 token_payload = json.dumps({"type": "token", "content": token})
@@ -681,8 +747,8 @@ async def query_stream_endpoint(request: QueryRequest):
             error_payload = json.dumps({"type": "error", "message": str(e)})
             yield f"data: {error_payload}\n\n"
 
-        # Done event
         total_ms = round((time.time() - t0) * 1000, 1)
+        _metrics["query_latencies_ms"].append(total_ms)
         done_payload = json.dumps({"type": "done", "total_ms": total_ms})
         yield f"data: {done_payload}\n\n"
 
@@ -702,7 +768,7 @@ async def get_paper(paper_id: str):
     """Look up paper metadata by ArXiv ID."""
     if _state["retriever"] is None:
         raise HTTPException(status_code=503, detail="Retriever not yet initialized.")
-        
+
     paper_info = _state["retriever"].papers_meta.get(paper_id)
     if not paper_info:
         raise HTTPException(status_code=404, detail=f"Paper '{paper_id}' not found.")
@@ -718,6 +784,16 @@ async def get_paper(paper_id: str):
         layer=paper_info.get("layer", "core"),
         is_seed=paper_info.get("is_seed", False),
     )
+
+
+@app.head("/paper/{paper_id}", include_in_schema=False)
+async def get_paper_head(paper_id: str):
+    """HEAD probe for paper metadata existence."""
+    if _state["retriever"] is None:
+        raise HTTPException(status_code=503, detail="Retriever not yet initialized.")
+    if paper_id not in _state["retriever"].papers_meta:
+        raise HTTPException(status_code=404, detail=f"Paper '{paper_id}' not found.")
+    return Response(status_code=200)
 
 
 @app.get("/paper/{paper_id}/similar", response_model=SimilarPapersResponse)
@@ -737,10 +813,27 @@ async def get_similar_papers(paper_id: str, top_n: int = 5):
     )
 
 
+@app.head("/paper/{paper_id}/similar", include_in_schema=False)
+async def get_similar_papers_head(paper_id: str):
+    """HEAD probe for similar papers endpoint availability."""
+    if _state["retriever"] is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Retriever not initialized.",
+        )
+    return Response(status_code=200)
+
+
 @app.get("/keep-alive")
 async def keep_alive():
     """Lightweight endpoint to keep the server awake."""
     return {"status": "alive", "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")}
+
+
+@app.head("/keep-alive", include_in_schema=False)
+async def keep_alive_head():
+    """HEAD probe for keep-alive endpoint."""
+    return Response(status_code=200)
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -750,11 +843,8 @@ async def health_check():
     db_papers = 0
 
     if _state["retriever"] is not None:
-        # collections is a dict of {name: points_count} from Qdrant retriever
         collections = dict(_state["retriever"].collections)
         db_papers = len(_state["retriever"].papers_meta)
-        
-        # If Qdrant points count isn't immediately available, use our local BM25 chunks count
         if "arxiv_text" not in collections:
             collections["arxiv_text"] = len(_state["retriever"].chunks_meta)
 
@@ -765,3 +855,37 @@ async def health_check():
         uptime_seconds=round(time.time() - _state["start_time"], 1),
         cache_stats=query_cache.stats,
     )
+
+
+@app.head("/health", include_in_schema=False)
+async def health_check_head():
+    """HEAD probe for health checks and uptime monitors."""
+    return Response(status_code=200)
+
+
+@app.get("/metrics/performance")
+async def performance_metrics():
+    """Project-wide performance metrics including historical p95 for /query."""
+    rolling_request_latencies = list(_metrics["request_latencies_ms"])
+    rolling_query_latencies = list(_metrics["query_latencies_ms"])
+    historical_query_latencies = _historical_query_latencies()
+
+    return {
+        "uptime_seconds": round(time.time() - _state["start_time"], 1),
+        "query_count": _state["query_count"],
+        "rolling": {
+            "requests": _latency_summary(rolling_request_latencies),
+            "queries": _latency_summary(rolling_query_latencies),
+            "window_size": {
+                "requests": _metrics["request_latencies_ms"].maxlen,
+                "queries": _metrics["query_latencies_ms"].maxlen,
+            },
+        },
+        "historical_queries": _latency_summary(historical_query_latencies),
+    }
+
+
+@app.head("/metrics/performance", include_in_schema=False)
+async def performance_metrics_head():
+    """HEAD probe for performance metrics endpoint."""
+    return Response(status_code=200)
