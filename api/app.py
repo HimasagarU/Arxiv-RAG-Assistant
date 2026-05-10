@@ -1,4 +1,4 @@
-﻿"""
+"""
 app.py â€” FastAPI application for the ArXiv RAG Assistant.
 
 Endpoints:
@@ -182,6 +182,8 @@ _state = {
 _metrics = {
     "request_latencies_ms": deque(maxlen=5000),
     "query_latencies_ms": deque(maxlen=5000),
+    "cache_hit_latencies_ms": deque(maxlen=5000),
+    "cache_miss_latencies_ms": deque(maxlen=5000),
 }
 
 
@@ -584,6 +586,7 @@ async def query_endpoint(request: QueryRequest):
             detail="Retriever not initialized. Please ensure indexes are built.",
         )
 
+    t0 = time.time()
     cache_key = query_cache._make_key(
         request.query, request.top_k, request.category,
         request.author, request.start_year
@@ -591,10 +594,12 @@ async def query_endpoint(request: QueryRequest):
     cached_result = query_cache.get(cache_key)
     if cached_result:
         cached_result["cached"] = True
+        hit_ms = round((time.time() - t0) * 1000, 1)
+        _metrics["cache_hit_latencies_ms"].append(hit_ms)
+        _metrics["query_latencies_ms"].append(hit_ms)
         log_query(request.query, cached_result)
         return QueryResponse(**cached_result)
 
-    t0 = time.time()
     _state["query_count"] += 1
 
     from api.retrieval import classify_query_intent
@@ -625,6 +630,7 @@ async def query_endpoint(request: QueryRequest):
 
     total_ms = round((time.time() - t0) * 1000, 1)
     _metrics["query_latencies_ms"].append(total_ms)
+    _metrics["cache_miss_latencies_ms"].append(total_ms)
 
     sources = [
         SourceInfo(
@@ -749,6 +755,7 @@ async def query_stream_endpoint(request: QueryRequest):
 
         total_ms = round((time.time() - t0) * 1000, 1)
         _metrics["query_latencies_ms"].append(total_ms)
+        _metrics["cache_miss_latencies_ms"].append(total_ms)
         done_payload = json.dumps({"type": "done", "total_ms": total_ms})
         yield f"data: {done_payload}\n\n"
 
@@ -868,7 +875,13 @@ async def performance_metrics():
     """Project-wide performance metrics including historical p95 for /query."""
     rolling_request_latencies = list(_metrics["request_latencies_ms"])
     rolling_query_latencies = list(_metrics["query_latencies_ms"])
+    cache_hit_latencies = list(_metrics["cache_hit_latencies_ms"])
+    cache_miss_latencies = list(_metrics["cache_miss_latencies_ms"])
     historical_query_latencies = _historical_query_latencies()
+
+    hit_summary = _latency_summary(cache_hit_latencies)
+    miss_summary = _latency_summary(cache_miss_latencies)
+    avg_reduction = max(0, miss_summary["avg_ms"] - hit_summary["avg_ms"])
 
     return {
         "uptime_seconds": round(time.time() - _state["start_time"], 1),
@@ -880,6 +893,12 @@ async def performance_metrics():
                 "requests": _metrics["request_latencies_ms"].maxlen,
                 "queries": _metrics["query_latencies_ms"].maxlen,
             },
+        },
+        "lru_cache_impact": {
+            "cache_hit_summary": hit_summary,
+            "cache_miss_summary": miss_summary,
+            "avg_latency_reduction_ms": round(avg_reduction, 1),
+            "estimated_time_saved_ms": round(avg_reduction * hit_summary["count"], 1),
         },
         "historical_queries": _latency_summary(historical_query_latencies),
     }
