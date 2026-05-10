@@ -232,6 +232,8 @@ def main():
                         help="Output JSON path for per-query results.")
     parser.add_argument("--llm-model", type=str, default="llama-3.3-70b-versatile",
                         help="LLM model for RAGAS evaluation judge.")
+    parser.add_argument("--restart", action="store_true",
+                        help="Ignore existing results and start from scratch.")
     args = parser.parse_args()
 
     # Load questions
@@ -249,7 +251,35 @@ def main():
     if args.limit:
         questions = questions[:args.limit]
 
-    log.info(f"Loaded {len(questions)} evaluation questions")
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = args.output or str(RESULTS_DIR / "ragas_results.json")
+
+    # Load existing results for resume capability
+    existing_scored = []
+    evaluated_questions = set()
+    if not args.restart and os.path.exists(output_path):
+        try:
+            with open(output_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                existing_scored = data.get("scored", [])
+                for rec in existing_scored:
+                    ragas_scores = rec.get("ragas", {})
+                    # If it has a faithfulness score, we consider it successfully evaluated
+                    if ragas_scores.get("faithfulness") is not None:
+                        evaluated_questions.add(rec["question"])
+        except Exception as e:
+            log.warning(f"Could not load existing results: {e}")
+
+    remaining_questions = [q for q in questions if q["question"] not in evaluated_questions]
+
+    log.info(f"Loaded {len(questions)} total questions.")
+    if evaluated_questions:
+        log.info(f"  {len(evaluated_questions)} already evaluated. {len(remaining_questions)} remaining.")
+
+    if not remaining_questions:
+        log.info("All questions have already been evaluated! Use --restart to start over.")
+        print_summary(existing_scored)
+        return
 
     # ── Step 1: Run queries through the pipeline ──
     log.info("Step 1: Running queries through RAG pipeline...")
@@ -257,8 +287,8 @@ def main():
 
     if args.api_url:
         log.info(f"  Using deployed API: {args.api_url}")
-        for i, q in enumerate(questions):
-            log.info(f"  [{i+1}/{len(questions)}] {q['question'][:60]}...")
+        for i, q in enumerate(remaining_questions):
+            log.info(f"  [{i+1}/{len(remaining_questions)}] {q['question'][:60]}...")
             try:
                 rec = _run_query_api(q["question"], args.api_url)
                 rec["intent"] = q.get("intent", rec.get("intent", "discovery"))
@@ -270,8 +300,8 @@ def main():
         from api.retrieval import HybridRetriever
         retriever = HybridRetriever()
 
-        for i, q in enumerate(questions):
-            log.info(f"  [{i+1}/{len(questions)}] {q['question'][:60]}...")
+        for i, q in enumerate(remaining_questions):
+            log.info(f"  [{i+1}/{len(remaining_questions)}] {q['question'][:60]}...")
             try:
                 rec = _run_query_local(q["question"], retriever)
                 rec["intent"] = q.get("intent", rec.get("intent", "discovery"))
@@ -280,7 +310,9 @@ def main():
                 log.error(f"  Pipeline failed: {e}")
 
     if not records:
-        log.error("No records to evaluate. Exiting.")
+        log.error("No new records were successfully generated to evaluate.")
+        if existing_scored:
+            print_summary(existing_scored)
         return
 
     # ── Step 2: Run RAGAS metrics ──
@@ -297,23 +329,24 @@ def main():
     llm = ChatGroq(model=args.llm_model, api_key=groq_api_key, temperature=0)
     evaluator_llm = LangchainLLMWrapper(llm)
 
-    scored = asyncio.run(evaluate_with_ragas(records, evaluator_llm))
-
-    # ── Step 3: Report ──
-    print_summary(scored)
-
-    # ── Step 4: Save results ──
-    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = args.output or str(RESULTS_DIR / "ragas_results.json")
+    new_scored = asyncio.run(evaluate_with_ragas(records, evaluator_llm))
 
     # Strip non-serializable trace data
-    for rec in scored:
+    for rec in new_scored:
         rec.pop("trace", None)
 
+    # ── Step 3: Combine and Save ──
+    # Replace any existing failed records with the new successful ones
+    combined_scored = [r for r in existing_scored if r["question"] not in [n["question"] for n in new_scored]]
+    combined_scored.extend(new_scored)
+
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump({"scored": scored, "total_queries": len(scored)}, f, indent=2, default=str)
+        json.dump({"scored": combined_scored, "total_queries": len(combined_scored)}, f, indent=2, default=str)
 
     log.info(f"Results saved → {output_path}")
+
+    # ── Step 4: Report ──
+    print_summary(combined_scored)
 
 
 if __name__ == "__main__":
