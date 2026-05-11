@@ -1,11 +1,5 @@
-/**
- * api.js — Centralized API client for the ArXiv RAG backend.
- *
- * All API calls go through this module so auth tokens are
- * automatically attached and errors are handled consistently.
- */
-
-const API_BASE = import.meta.env.VITE_API_URL || '';
+// Remove trailing slash if present to avoid double slashes when combined with paths starting with '/'
+const API_BASE = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
 /**
  * Get the stored access token.
