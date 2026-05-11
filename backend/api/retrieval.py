@@ -834,7 +834,7 @@ class HybridRetriever:
                 query_filter=Filter(
                     must_not=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
                 ),
-                limit=top_n * 5,
+                limit=100,
                 with_payload=True,
             )
             results = res.points
