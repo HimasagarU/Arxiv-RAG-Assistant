@@ -197,6 +197,15 @@ async def lifespan(app: FastAPI):
     log.info("Starting ArXiv RAG API...")
     _state["start_time"] = time.time()
 
+    # Initialize application database (Supabase — users, conversations, jobs)
+    try:
+        from db.app_database import init_app_db, close_app_db
+        await init_app_db()
+        log.info("Application database initialized.")
+    except Exception as e:
+        log.error(f"Failed to initialize app database: {e}")
+        log.warning("Auth, chat history, and document features will be unavailable.")
+
     def init_retriever():
         try:
             import sys
@@ -218,6 +227,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Shutdown
+    try:
+        from db.app_database import close_app_db
+        await close_app_db()
+    except Exception:
+        pass
     log.info("Shutting down ArXiv RAG API...")
 
 
@@ -236,6 +251,11 @@ allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
 allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
 if not allowed_origins:
     allowed_origins = ["http://localhost:3000"]
+# Always allow localhost dev and common Vercel deploy patterns
+allowed_origins.extend([
+    "http://localhost:5173",  # Vite dev server
+    "http://127.0.0.1:5173",
+])
 
 app.add_middleware(
     CORSMiddleware,
@@ -244,6 +264,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+# ---------------------------------------------------------------------------
+# Mount new routers (auth, chat, documents)
+# ---------------------------------------------------------------------------
+
+try:
+    from api.auth import router as auth_router
+    from api.chat import router as chat_router
+    from api.documents import router as documents_router
+
+    app.include_router(auth_router)
+    app.include_router(chat_router)
+    app.include_router(documents_router)
+    log.info("Mounted routers: auth, chat, documents")
+except Exception as e:
+    log.warning(f"Failed to mount new routers: {e}. Core /query endpoint still available.")
 
 
 @app.middleware("http")
