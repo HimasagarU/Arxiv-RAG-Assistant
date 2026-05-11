@@ -96,6 +96,32 @@ The presentation layer is a React-based single-page web application housed in `f
 - **Server-Sent Events (SSE)**: Connects to the `/query/stream` endpoint to stream LLM generation token-by-token.
 - **Interactive Citations**: Renders exact quotes, layer distributions, latency metrics, and paper reference links dynamically as the answer streams in.
 
+---
+
+## Core User Workflows
+
+### 💬 General Chat
+1. **Query Intent Classification**: The user submits a question. A regex-based classifier determines the intent (e.g., `explanatory`, `discovery`).
+2. **Hybrid Retrieval**: The query is sent to both Qdrant Cloud (Dense vectors) and the local BM25 index (Lexical matching).
+3. **Reciprocal Rank Fusion (RRF)**: The dense and lexical scores are fused together, weighted based on the query's intent.
+4. **Cross-Encoder Reranking**: The fused candidates are reranked using a lightweight cross-encoder model to maximize precision.
+5. **LLM Generation**: The top compressed contexts are sent to Groq (Llama 3.3 70B), which streams back the answer and structured citations via SSE.
+
+### 📥 Add Document
+1. **Corpus Check**: The backend checks the fast in-memory `papers_meta` and the NeonDB. If the ArXiv ID exists, it instantly returns a successful status.
+2. **Processing**: If it's a new paper, the PDF is downloaded, parsed via PyMuPDF, and split into 450-token semantic chunks.
+3. **Embedding**: The text chunks are embedded using BGE-Large-EN-v1.5 and pushed to Qdrant Cloud.
+4. **Dynamic Update**: The in-memory BM25 index and metadata dictionaries are dynamically updated without a restart, and the changes are persisted to the local artifact JSON files.
+
+### 📄 Chat with Document
+1. **Metadata Filtering**: When chatting with a specific document, the exact same Hybrid Retrieval pipeline from the "General Chat" is used, but a strict `paper_id` filter is applied to both Qdrant and BM25 searches.
+2. **Isolated Context**: The LLM is forced to exclusively use the compressed text from the selected document, completely isolating it from the broader RAG corpus.
+
+### 🔗 Similar Papers
+1. **Mean Embedding Lookup**: When a user clicks "Similar Papers" on a citation, the backend retrieves the cached average embedding of the cited paper.
+2. **Dense Similarity Search**: A fast cosine similarity search is performed against the mean embeddings of all other 3000+ papers in the Qdrant cluster.
+3. **Recommendation**: The top 5 nearest neighbors are returned and displayed in the frontend as interactive paper cards.
+
 ## Key Features
 
 ### Seed-Driven Corpus Building
