@@ -14,6 +14,8 @@ export default function Dashboard() {
   const [arxivId, setArxivId] = useState('');
   const [addingDoc, setAddingDoc] = useState(false);
   const [addError, setAddError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const pollingJobsRef = useRef(new Set());
   const [chatPage, setChatPage] = useState(1);
   const [docPage, setDocPage] = useState(1);
   const ITEMS_PER_PAGE = 5;
