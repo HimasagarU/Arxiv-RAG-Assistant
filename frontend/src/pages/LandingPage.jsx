@@ -2,9 +2,11 @@ import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ThemeToggle from '../components/ThemeToggle';
 import { useTheme } from '../context/ThemeContext';
+import { useAuth } from '../context/AuthContext';
 
 function LandingPage() {
   const { isDark } = useTheme();
+  const { user } = useAuth();
   const [query, setQuery] = useState('');
   const [topK, setTopK] = useState(5);
   const [filterYear, setFilterYear] = useState('');
@@ -92,9 +94,16 @@ function LandingPage() {
 
   const useSample = (text) => {
     setQuery(text);
-    // Auto submit?
-    // setTimeout(() => submitQuery(), 100);
   };
+
+  function renderMarkdown(text) {
+    if (!text) return '';
+    return text
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.*?)\*/g, '<em>$1</em>')
+      .replace(/`(.*?)`/g, '<code>$1</code>')
+      .replace(/\n/g, '<br/>');
+  }
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}>
@@ -124,12 +133,20 @@ function LandingPage() {
 
             {/* Auth Buttons */}
             <div className="flex items-center gap-2">
-              <Link to="/login" className="btn-ghost">
-                Sign In
-              </Link>
-              <Link to="/register" className="btn-primary">
-                Sign Up
-              </Link>
+              {user ? (
+                <Link to="/dashboard" className="btn-primary">
+                  Go to App
+                </Link>
+              ) : (
+                <>
+                  <Link to="/login" className="btn-ghost">
+                    Sign In
+                  </Link>
+                  <Link to="/register" className="btn-primary">
+                    Sign Up
+                  </Link>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -271,9 +288,10 @@ function LandingPage() {
                 <div className="font-heading text-sm font-semibold text-[var(--color-accent)] mb-3 uppercase tracking-wider">
                   Generated Answer
                 </div>
-                <div className="text-[var(--color-text-primary)] text-lg leading-relaxed whitespace-pre-wrap">
-                  {answer}
-                </div>
+                <div 
+                  className="chat-markdown text-[var(--color-text-primary)] text-lg leading-relaxed"
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(answer) }}
+                />
               </div>
             )}
 

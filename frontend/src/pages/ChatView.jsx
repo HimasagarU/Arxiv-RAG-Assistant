@@ -151,7 +151,7 @@ export default function ChatView() {
         }}
       >
         <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
-          <Link to="/" className="text-lg font-bold block mb-3" style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
+          <Link to="/dashboard" className="text-lg font-bold block mb-3" style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
             ArXiv RAG
           </Link>
           <button id="sidebar-new-chat" onClick={handleNewChat} className="btn-primary w-full text-sm">
