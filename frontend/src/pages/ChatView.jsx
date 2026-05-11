@@ -157,8 +157,8 @@ export default function ChatView() {
           overflow: 'hidden',
         }}
       >
-        <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
-          <div className="flex items-center gap-3">
+        <div className="px-4 h-14 flex items-center border-b" style={{ borderColor: 'var(--color-border)' }}>
+          <div className="flex items-center gap-3 w-full">
             <Link to="/dashboard" className="min-w-0 flex-1 text-lg font-bold leading-none" style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
               ArXiv RAG
             </Link>
@@ -202,8 +202,8 @@ export default function ChatView() {
           ))}
         </div>
 
-        <div className="p-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
-          <div className="flex items-center gap-3">
+        <div className="px-4 h-20 flex items-center border-t" style={{ borderColor: 'var(--color-border)' }}>
+          <div className="flex items-center gap-3 w-full">
             <div className="min-w-0 flex-1 rounded-xl border px-3 py-2" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-card)' }}>
               <p className="text-[11px] uppercase tracking-[0.18em]" style={{ color: 'var(--color-text-muted)' }}>
                 Signed in as
@@ -222,13 +222,13 @@ export default function ChatView() {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b bg-[var(--color-bg-card)]/90 backdrop-blur"
+        <div className="flex items-center gap-3 px-4 h-14 border-b bg-[var(--color-bg-card)]/90 backdrop-blur"
              style={{ borderColor: 'var(--color-border)' }}>
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="icon-btn text-lg" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}>
             {sidebarOpen ? '◀' : '▶'}
           </button>
           
-          <button onClick={() => navigate('/dashboard')} className="btn-ghost text-sm flex items-center gap-1">
+          <button onClick={() => navigate('/dashboard')} className="btn-soft text-sm flex items-center gap-1">
             <span>←</span> Back to Dashboard
           </button>
           
@@ -425,34 +425,36 @@ export default function ChatView() {
         </div>
 
         {/* Input */}
-        <div className="border-t px-4 py-4 bg-[var(--color-bg-card)]/90 backdrop-blur" style={{ borderColor: 'var(--color-border)' }}>
-          {error && (
-            <div className="max-w-3xl mx-auto mb-3 p-3 rounded-lg text-sm"
-                 style={{ background: 'rgba(248, 113, 113, 0.1)', color: 'var(--color-error)', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
-              {error}
-            </div>
-          )}
-          <form onSubmit={handleSend} className="max-w-3xl mx-auto flex gap-3">
-            <input
-              ref={inputRef}
-              id="chat-input"
-              type="text"
-              className="input-field flex-1"
-              placeholder={queryCount >= MAX_QUERIES ? 'Query limit reached — start a new conversation' : 'Ask about AI research papers...'}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              disabled={sending || queryCount >= MAX_QUERIES}
-              autoFocus
-            />
-            <button
-              id="chat-send"
-              type="submit"
-              className="btn-primary"
-              disabled={sending || !query.trim() || queryCount >= MAX_QUERIES}
-            >
-              {sending ? '...' : 'Send'}
-            </button>
-          </form>
+        <div className="border-t px-4 min-h-[5rem] flex items-center bg-[var(--color-bg-card)]/90 backdrop-blur" style={{ borderColor: 'var(--color-border)' }}>
+          <div className="w-full">
+            {error && (
+              <div className="max-w-3xl mx-auto mb-3 p-3 rounded-lg text-sm"
+                   style={{ background: 'rgba(248, 113, 113, 0.1)', color: 'var(--color-error)', border: '1px solid rgba(248, 113, 113, 0.2)' }}>
+                {error}
+              </div>
+            )}
+            <form onSubmit={handleSend} className="max-w-3xl mx-auto flex gap-3">
+              <input
+                ref={inputRef}
+                id="chat-input"
+                type="text"
+                className="input-field flex-1"
+                placeholder={queryCount >= MAX_QUERIES ? 'Query limit reached — start a new conversation' : 'Ask about AI research papers...'}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                disabled={sending || queryCount >= MAX_QUERIES}
+                autoFocus
+              />
+              <button
+                id="chat-send"
+                type="submit"
+                className="btn-primary"
+                disabled={sending || !query.trim() || queryCount >= MAX_QUERIES}
+              >
+                {sending ? '...' : 'Send'}
+              </button>
+            </form>
+          </div>
         </div>
       </div>
     </div>

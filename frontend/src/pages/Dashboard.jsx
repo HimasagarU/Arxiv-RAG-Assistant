@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { listConversations, createConversation, deleteConversation, listDocuments, addDocument, getDocumentStatus } from '../api';
@@ -15,6 +15,7 @@ export default function Dashboard() {
   const [addingDoc, setAddingDoc] = useState(false);
   const [addError, setAddError] = useState('');
   const [loading, setLoading] = useState(true);
+  const pollingJobsRef = useRef(new Set());
 
   useEffect(() => {
     loadData();
@@ -89,11 +90,12 @@ export default function Dashboard() {
   // Resume polling for in-progress docs on load
   useEffect(() => {
     documents.forEach((doc) => {
-      if (!['done', 'failed'].includes(doc.status)) {
+      if (!['done', 'failed'].includes(doc.status) && !pollingJobsRef.current.has(doc.id)) {
+        pollingJobsRef.current.add(doc.id);
         pollJobStatus(doc.id);
       }
     });
-  }, [documents.length]);
+  }, [documents]);
 
   const statusConfig = {
     queued: { label: 'Queued', color: 'var(--color-text-muted)', icon: '⏳' },
@@ -112,14 +114,17 @@ export default function Dashboard() {
         subtitle="Manage conversations, add papers, and keep your research workflow in one place."
         actions={(
           <>
-            <Link to="/how-it-works" className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+            <Link to="/how-it-works" className="btn-soft text-sm">
               How It Works
             </Link>
-            <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
-              {user?.display_name}
-            </span>
+            <div className="flex items-center gap-2 rounded-full border px-3 py-1.5 text-sm" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-card)' }}>
+              <div className="w-2 h-2 rounded-full bg-[var(--color-accent)]" />
+              <span className="font-medium" style={{ color: 'var(--color-text-primary)' }}>
+                {user?.display_name}
+              </span>
+            </div>
             <ThemeToggle />
-            <button onClick={logout} className="btn-ghost text-xs">
+            <button onClick={logout} className="btn-soft text-xs">
               Sign Out
             </button>
           </>
@@ -128,11 +133,11 @@ export default function Dashboard() {
 
       <main className="mx-auto max-w-6xl px-4 sm:px-6 py-8">
         {/* Quick Actions */}
-        <div className="flex gap-4 mb-8">
+        <div className="flex flex-wrap gap-4 mb-8 items-center">
           <button id="new-chat-btn" onClick={handleNewChat} className="btn-primary flex items-center gap-2">
             <span>+</span> New Conversation
           </button>
-          <button id="add-doc-btn" onClick={() => setShowAddDoc(true)} className="btn-ghost flex items-center gap-2">
+          <button id="add-doc-btn" onClick={() => setShowAddDoc(true)} className="btn-soft flex items-center gap-2">
             <span>📄</span> Add Document
           </button>
         </div>
@@ -230,11 +235,12 @@ export default function Dashboard() {
                     </div>
                     <button
                       onClick={(e) => { e.stopPropagation(); handleDeleteConv(conv.id); }}
-                      className="text-sm px-2 py-1 rounded opacity-50 hover:opacity-100 transition-opacity"
-                      style={{ color: 'var(--color-error)' }}
+                      className="icon-btn opacity-60 hover:opacity-100 transition-all"
+                      style={{ color: 'var(--color-error)', width: '2rem', height: '2rem' }}
                       title="Delete"
+                      aria-label="Delete conversation"
                     >
-                      ×
+                      <span className="text-base leading-none">×</span>
                     </button>
                   </div>
                 ))}
