@@ -1,0 +1,50 @@
+{"question": "What is a sparse autoencoder and how is it used in mechanistic interpretability?", "intent": "explanatory"}
+{"question": "How does activation patching work for identifying circuits in transformers?", "intent": "explanatory"}
+{"question": "What are induction heads and why are they important for in-context learning?", "intent": "explanatory"}
+{"question": "Explain the concept of superposition in neural networks.", "intent": "explanatory"}
+{"question": "What is polysemanticity and how does it relate to superposition?", "intent": "explanatory"}
+{"question": "How does the logit lens technique work for interpreting transformer predictions?", "intent": "explanatory"}
+{"question": "What is the residual stream view of transformers?", "intent": "explanatory"}
+{"question": "Explain how knowledge neurons are identified in language models.", "intent": "explanatory"}
+{"question": "What is representation engineering and how does it steer model behavior?", "intent": "explanatory"}
+{"question": "How do attention heads contribute to in-context learning?", "intent": "explanatory"}
+{"question": "What is the tuned lens and how does it improve on the logit lens?", "intent": "explanatory"}
+{"question": "Explain what circuit discovery means in the context of mechanistic interpretability.", "intent": "explanatory"}
+{"question": "What are monosemantic features and why are they desirable?", "intent": "explanatory"}
+{"question": "How does causal tracing help identify factual associations in language models?", "intent": "explanatory"}
+{"question": "What is the role of MLP layers in storing factual knowledge?", "intent": "explanatory"}
+{"question": "Explain the concept of feature splitting in sparse autoencoders.", "intent": "explanatory"}
+{"question": "What is probing and how is it used to study internal representations?", "intent": "explanatory"}
+{"question": "How does dictionary learning apply to understanding neural network features?", "intent": "explanatory"}
+{"question": "What are universal features across different neural networks?", "intent": "explanatory"}
+{"question": "Explain how the indirect object identification circuit works in GPT-2.", "intent": "explanatory"}
+{"question": "Compare activation patching vs path patching for circuit identification.", "intent": "comparative"}
+{"question": "What is the difference between the logit lens and the tuned lens?", "intent": "comparative"}
+{"question": "Compare sparse autoencoders vs probing classifiers for feature extraction.", "intent": "comparative"}
+{"question": "What are the trade-offs between causal tracing and activation patching?", "intent": "comparative"}
+{"question": "Compare top-down vs bottom-up approaches to circuit discovery.", "intent": "comparative"}
+{"question": "How does representation engineering differ from activation steering?", "intent": "comparative"}
+{"question": "Compare SAE-based feature identification vs neuron-level analysis.", "intent": "comparative"}
+{"question": "What are the pros and cons of linear probing vs nonlinear probing?", "intent": "comparative"}
+{"question": "Compare the residual stream view vs the attention-centric view of transformers.", "intent": "comparative"}
+{"question": "How do TopK sparse autoencoders compare to standard L1-regularized SAEs?", "intent": "comparative"}
+{"question": "What is the mathematical formulation of sparse autoencoder loss?", "intent": "technical"}
+{"question": "Derive the formula for activation patching in a transformer.", "intent": "technical"}
+{"question": "What is the algorithm for automated circuit discovery via path patching?", "intent": "technical"}
+{"question": "What is the formal definition of the residual stream decomposition?", "intent": "technical"}
+{"question": "How is the sparsity penalty computed in TopK sparse autoencoders?", "intent": "technical"}
+{"question": "What is the equation for computing indirect effects in causal mediation analysis?", "intent": "technical"}
+{"question": "How is feature importance computed when evaluating SAE reconstructions?", "intent": "technical"}
+{"question": "What is the pseudocode for the ACDC algorithm?", "intent": "technical"}
+{"question": "What is the mathematical definition of superposition capacity?", "intent": "technical"}
+{"question": "How is the cross-entropy loss decomposed for logit attribution?", "intent": "technical"}
+{"question": "What are the latest advances in mechanistic interpretability for 2024-2025?", "intent": "sota"}
+{"question": "What is the state of the art in sparse autoencoder training methods?", "intent": "sota"}
+{"question": "What recent work has been done on scaling circuit discovery to large models?", "intent": "sota"}
+{"question": "What are the newest approaches to understanding transformer reasoning circuits?", "intent": "sota"}
+{"question": "What are the current trends in using interpretability for AI safety?", "intent": "sota"}
+{"question": "Find papers about attention head specialization in transformers.", "intent": "discovery"}
+{"question": "Papers on using sparse autoencoders to find safety-relevant features.", "intent": "discovery"}
+{"question": "Research on superposition and polysemanticity in vision transformers.", "intent": "discovery"}
+{"question": "Work on automated circuit discovery tools and frameworks.", "intent": "discovery"}
+{"question": "Studies on how transformers implement multi-step reasoning.", "intent": "discovery"}
