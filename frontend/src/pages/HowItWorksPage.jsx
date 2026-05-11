@@ -159,14 +159,25 @@ export default function HowItWorksPage() {
           </p>
         </div>
 
+        {/* Architecture summary */}
+        <div className="mt-12 glass-card p-8 text-center animate-fade-in" style={{ animationDelay: '300ms' }}>
+          <h2 className="text-2xl font-bold mb-6" style={{ fontFamily: 'var(--font-heading)' }}>
+            System Architecture
+          </h2>
+          <ImageExpandable src="/architecture.png" alt="System Architecture Diagram" onExpand={setSelectedImg} />
+          <p className="text-sm mt-6" style={{ color: 'var(--color-text-muted)' }}>
+            Built with FastAPI · Qdrant Cloud · Groq · React
+          </p>
+        </div>
+
         {/* Pipeline steps */}
-        <div className="relative">
+        <div className="relative mt-20">
           {/* Vertical connecting line */}
           <div className="absolute left-8 top-0 bottom-0 w-px" style={{ background: 'var(--color-border)' }} />
 
           <div className="space-y-12">
             {steps.map((step, i) => (
-              <div key={i} className="relative pl-20 animate-fade-in" style={{ animationDelay: `${i * 100}ms` }}>
+              <div key={i} className="relative pl-20 animate-fade-in" style={{ animationDelay: `${i * 100 + 500}ms` }}>
                 {/* Step number circle */}
                 <div
                   className="absolute left-4 w-8 h-8 rounded-full flex items-center justify-center text-lg z-10"
@@ -201,17 +212,6 @@ export default function HowItWorksPage() {
               </div>
             ))}
           </div>
-        </div>
-
-        {/* Architecture summary */}
-        <div className="mt-16 glass-card p-8 text-center animate-fade-in" style={{ animationDelay: '400ms' }}>
-          <h2 className="text-2xl font-bold mb-6" style={{ fontFamily: 'var(--font-heading)' }}>
-            System Architecture
-          </h2>
-          <ImageExpandable src="/architecture.png" alt="System Architecture Diagram" onExpand={setSelectedImg} />
-          <p className="text-sm mt-6" style={{ color: 'var(--color-text-muted)' }}>
-            Built with FastAPI · Qdrant Cloud · Groq · React
-          </p>
         </div>
 
         {/* Feature Workflows */}

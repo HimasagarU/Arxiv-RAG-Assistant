@@ -123,6 +123,9 @@ function LandingPage() {
             </div>
 
             <ThemeToggle />
+            <Link to="/how-it-works" className="btn-ghost text-sm">
+              How It Works
+            </Link>
 
             <div className="flex items-center gap-2">
               {user ? (
