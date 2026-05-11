@@ -7,12 +7,12 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      '/auth': 'http://localhost:8000',
-      '/conversations': 'http://localhost:8000',
-      '/documents': 'http://localhost:8000',
-      '/query': 'http://localhost:8000',
-      '/paper': 'http://localhost:8000',
-      '/health': 'http://localhost:8000',
+      '/auth': 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space',
+      '/conversations': 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space',
+      '/documents': 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space',
+      '/query': 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space',
+      '/paper': 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space',
+      '/health': 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space',
     },
   },
 })
