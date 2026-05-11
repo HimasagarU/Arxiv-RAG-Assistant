@@ -196,6 +196,101 @@ class HybridRetriever:
 
         log.info("HybridRetriever ready.")
 
+    def add_paper(self, paper_meta: dict, chunks: list[dict]):
+        """Dynamically add a new paper to the in-memory retriever structures."""
+        paper_id = paper_meta["paper_id"]
+        
+        # 1. Update papers meta
+        self.papers_meta[paper_id] = {
+            "title": paper_meta.get("title", ""),
+            "authors": paper_meta.get("authors", ""),
+            "published": paper_meta.get("published", ""),
+            "categories": paper_meta.get("categories", "")
+        }
+        
+        # 2. Update chunks meta and text
+        new_tokens_list = []
+        for chunk in chunks:
+            chunk_id = chunk["chunk_id"]
+            self.chunks_meta.append({
+                "chunk_id": chunk_id,
+                "paper_id": paper_id,
+                "title": chunk.get("title", ""),
+                "authors": chunk.get("authors", ""),
+                "categories": chunk.get("categories", ""),
+                "chunk_type": chunk.get("chunk_type", "text"),
+                "section_hint": chunk.get("section_hint", "other"),
+                "layer": chunk.get("layer", "core"),
+                "token_count": chunk.get("token_count", 0),
+                "chunk_index": chunk.get("chunk_index", 0),
+                "total_chunks": chunk.get("total_chunks", 1),
+                "chunk_source": chunk.get("chunk_source", "full_text")
+            })
+            self.chunks_text[chunk_id] = chunk["chunk_text"]
+            
+            # Tokenize for BM25
+            if self.bm25 and hasattr(self.bm25, 'tokenizer'):
+                tokens = self.bm25.tokenizer(chunk["chunk_text"])
+                new_tokens_list.append(tokens)
+        
+        # 3. Dynamically update BM25 index (approximate)
+        if self.bm25 and new_tokens_list:
+            for tokens in new_tokens_list:
+                freqs = {}
+                for t in tokens:
+                    freqs[t] = freqs.get(t, 0) + 1
+                self.bm25.doc_freqs.append(freqs)
+                self.bm25.doc_len.append(len(tokens))
+                self.bm25.corpus_size += 1
+                
+                # Assign average IDF to completely unseen terms
+                for t in freqs:
+                    if t not in self.bm25.idf:
+                        self.bm25.idf[t] = getattr(self.bm25, 'average_idf', 0.0)
+            
+            self.bm25.avgdl = sum(self.bm25.doc_len) / max(1, self.bm25.corpus_size)
+
+        # 4. Persist to local artifact files to survive restarts
+        try:
+            data_dir = Path(os.getenv("DATA_DIR", "data"))
+            
+            # Re-write papers_meta.json
+            with open(data_dir / "papers_meta.json", "w", encoding="utf-8") as f:
+                json.dump(self.papers_meta, f, indent=2)
+                
+            # Append to chunks_meta.jsonl
+            with open(data_dir / "chunks_meta.jsonl", "a", encoding="utf-8") as f:
+                for chunk in chunks:
+                    chunk_id = chunk["chunk_id"]
+                    meta_entry = {
+                        "chunk_id": chunk_id,
+                        "paper_id": paper_id,
+                        "title": chunk.get("title", ""),
+                        "authors": chunk.get("authors", ""),
+                        "categories": chunk.get("categories", ""),
+                        "chunk_type": chunk.get("chunk_type", "text"),
+                        "section_hint": chunk.get("section_hint", "other"),
+                        "layer": chunk.get("layer", "core"),
+                        "token_count": chunk.get("token_count", 0),
+                        "chunk_index": chunk.get("chunk_index", 0),
+                        "total_chunks": chunk.get("total_chunks", 1),
+                        "chunk_source": chunk.get("chunk_source", "full_text")
+                    }
+                    f.write(json.dumps(meta_entry) + "\n")
+                    
+            # Append to chunks_text.jsonl
+            with open(data_dir / "chunks_text.jsonl", "a", encoding="utf-8") as f:
+                for chunk in chunks:
+                    text_entry = {
+                        "chunk_id": chunk["chunk_id"],
+                        "text": chunk["chunk_text"]
+                    }
+                    f.write(json.dumps(text_entry) + "\n")
+                    
+            log.info(f"Successfully persisted metadata for {paper_id} to disk.")
+        except Exception as e:
+            log.error(f"Failed to persist newly added paper to local files: {e}")
+
     # ------------------------------------------------------------------
     # Dense retrieval (Qdrant multi-collection)
     # ------------------------------------------------------------------
@@ -206,9 +301,16 @@ class HybridRetriever:
         return emb[0].tolist()
 
     def _build_qdrant_filter(self, category: Optional[str] = None,
-                             author: Optional[str] = None) -> Optional[Filter]:
-        """Build a Qdrant filter from user-supplied metadata filters."""
+                             author: Optional[str] = None,
+                             paper_id: Optional[str] = None) -> Optional[Filter]:
+        """Build a Qdrant filter from user-supplied metadata filters.
+        
+        When paper_id is set, adds a strict MatchValue filter to scope
+        retrieval to a single document (used by chat-with-document).
+        """
         conditions = []
+        if paper_id:
+            conditions.append(FieldCondition(key="paper_id", match=MatchValue(value=paper_id)))
         if category:
             conditions.append(FieldCondition(key="categories", match=MatchText(text=category.strip())))
         if author:
@@ -561,14 +663,24 @@ class HybridRetriever:
 
     def retrieve(self, query: str, top_n: int = None,
                  category: Optional[str] = None, author: Optional[str] = None,
-                 start_year: Optional[int] = None, intent: Optional[str] = None) -> dict:
+                 start_year: Optional[int] = None, intent: Optional[str] = None,
+                 paper_id: Optional[str] = None) -> dict:
+        """Main retrieval pipeline.
+        
+        Args:
+            paper_id: If set, restricts retrieval to chunks from this paper only
+                      (used by document-scoped chat).
+        """
         top_n = top_n or self.final_top_n
         intent = intent or classify_query_intent(query)
-        trace = {"intent": intent}
+        is_paper_scoped = paper_id is not None
+        trace = {"intent": intent, "paper_scoped": is_paper_scoped}
         t0 = time.time()
 
         is_explanatory = (intent == INTENT_EXPLANATORY)
-        qdrant_filter = self._build_qdrant_filter(category=category, author=author)
+        qdrant_filter = self._build_qdrant_filter(
+            category=category, author=author, paper_id=paper_id
+        )
 
         # Dense retrieval (multi-collection via Qdrant)
         t1 = time.time()
@@ -576,7 +688,7 @@ class HybridRetriever:
         trace["dense_ms"] = round((time.time() - t1) * 1000, 1)
         trace["dense_count"] = len(dense_candidates)
 
-        # Lexical retrieval (PostgreSQL FTS)
+        # Lexical retrieval — filter by paper_id if scoped
         t2 = time.time()
         lex_candidates = self._lexical_retrieve(
             query,
@@ -584,6 +696,12 @@ class HybridRetriever:
             author=author,
             start_year=start_year,
         )
+        # Post-filter BM25 results by paper_id for document-scoped chat
+        if paper_id and lex_candidates:
+            lex_candidates = [
+                c for c in lex_candidates
+                if c.get("metadata", {}).get("paper_id") == paper_id
+            ]
         trace["lex_ms"] = round((time.time() - t2) * 1000, 1)
         trace["lex_count"] = len(lex_candidates)
 
@@ -597,19 +715,22 @@ class HybridRetriever:
         trace["merged_count"] = len(merged)
         self.merge_top_m = orig_merge
 
-        # Recency / layer boost (skip for explanatory)
-        if not is_explanatory:
-            merged = self._apply_recency_boost(merged)
-            merged.sort(key=lambda x: x["fusion_score"], reverse=True)
+        # Skip corpus-wide balancing for paper-scoped retrieval
+        if not is_paper_scoped:
+            # Recency / layer boost (skip for explanatory)
+            if not is_explanatory:
+                merged = self._apply_recency_boost(merged)
+                merged.sort(key=lambda x: x["fusion_score"], reverse=True)
 
-        merged = self._filter_candidates_by_year(merged, start_year)
+            merged = self._filter_candidates_by_year(merged, start_year)
 
-        # Semantic pruning for explanatory
-        if is_explanatory:
-            merged = self._semantic_pruning(query, merged)
+            # Semantic pruning for explanatory
+            if is_explanatory:
+                merged = self._semantic_pruning(query, merged)
 
-        # Paper-level diversity: deduplicate BEFORE reranking
-        merged = self._enforce_paper_diversity(merged, max_per_paper=MAX_CHUNKS_PER_PAPER)
+            # Paper-level diversity: deduplicate BEFORE reranking
+            merged = self._enforce_paper_diversity(merged, max_per_paper=MAX_CHUNKS_PER_PAPER)
+
         trace["diverse_count"] = len(merged)
 
         # Rerank
