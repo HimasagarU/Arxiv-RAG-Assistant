@@ -783,6 +783,7 @@ class HybridRetriever:
         if COLLECTION_TEXT not in self.collections:
             return []
         try:
+            log.info(f"Searching for papers similar to: {paper_id}")
             # Scroll to get all points for this paper
             scroll_result = self.qdrant_client.scroll(
                 collection_name=COLLECTION_TEXT,
@@ -794,15 +795,39 @@ class HybridRetriever:
                 limit=100,
             )
             points = scroll_result[0]
+            
+            # Fallback to MatchText if MatchValue returns nothing
             if not points:
+                log.info(f"MatchValue for paper_id {paper_id} returned no points. Retrying with MatchText...")
+                scroll_result = self.qdrant_client.scroll(
+                    collection_name=COLLECTION_TEXT,
+                    scroll_filter=Filter(
+                        must=[FieldCondition(key="paper_id", match=MatchText(text=paper_id))]
+                    ),
+                    with_vectors=True,
+                    with_payload=True,
+                    limit=100,
+                )
+                points = scroll_result[0]
+
+            if not points:
+                log.warning(f"No points found for paper_id {paper_id} in Qdrant.")
                 return []
 
+            log.info(f"Found {len(points)} points for paper_id {paper_id}. Computing mean embedding...")
+
             # Compute mean embedding
-            embeddings = np.array([p.vector for p in points])
+            embeddings = [p.vector for p in points if p.vector is not None]
+            if not embeddings:
+                log.warning(f"Points found for paper_id {paper_id} but none had vectors.")
+                return []
+                
+            embeddings = np.array(embeddings)
             mean_emb = np.mean(embeddings, axis=0)
             mean_emb = mean_emb / np.linalg.norm(mean_emb)
 
             # Search for similar
+            log.info(f"Querying Qdrant for similar points...")
             res = self.qdrant_client.query_points(
                 collection_name=COLLECTION_TEXT,
                 query=mean_emb.tolist(),
@@ -810,6 +835,7 @@ class HybridRetriever:
                 with_payload=True,
             )
             results = res.points
+            log.info(f"Qdrant returned {len(results)} candidate points.")
 
             seen = {paper_id}
             papers = []
@@ -829,6 +855,8 @@ class HybridRetriever:
                     })
                     if len(papers) >= top_n:
                         break
+            
+            log.info(f"Found {len(papers)} unique similar papers.")
             return papers
         except Exception as e:
             log.error(f"Similar papers search failed: {e}")
