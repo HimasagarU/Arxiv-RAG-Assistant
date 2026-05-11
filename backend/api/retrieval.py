@@ -92,6 +92,15 @@ INTENT_RRF_WEIGHTS = {
     INTENT_DISCOVERY:   (0.4, 0.6),   # keyword-heavy queries favor FTS
 }
 
+
+def _bm25_tokenize(text: str) -> list[str]:
+    """Fallback tokenizer for BM25 artifact refreshes.
+
+    The persisted BM25 pickle does not always expose a callable tokenizer,
+    so this mirrors the offline builder's simple normalization.
+    """
+    return re.sub(r"[^\w\s]", "", text.lower()).split()
+
 def chunk_id_to_uuid(chunk_id: str) -> str:
     """Convert a string chunk_id to a deterministic UUID (must match build_qdrant.py)."""
     return str(uuid5(NAMESPACE_URL, chunk_id))
@@ -229,8 +238,11 @@ class HybridRetriever:
             self.chunks_text[chunk_id] = chunk["chunk_text"]
             
             # Tokenize for BM25
-            if self.bm25 and hasattr(self.bm25, 'tokenizer'):
-                tokens = self.bm25.tokenizer(chunk["chunk_text"])
+            tokenizer = getattr(self.bm25, "tokenizer", None) if self.bm25 else None
+            if callable(tokenizer):
+                tokens = tokenizer(chunk["chunk_text"])
+            else:
+                tokens = _bm25_tokenize(chunk["chunk_text"])
                 new_tokens_list.append(tokens)
         
         # 3. Dynamically update BM25 index (approximate)
