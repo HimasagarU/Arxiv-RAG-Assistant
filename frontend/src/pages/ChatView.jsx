@@ -209,6 +209,11 @@ export default function ChatView() {
                   className="text-lg" style={{ color: 'var(--color-text-secondary)' }}>
             {sidebarOpen ? '◀' : '▶'}
           </button>
+          
+          <button onClick={() => navigate('/dashboard')} className="btn-ghost text-sm flex items-center gap-1">
+            <span>←</span> Back to Dashboard
+          </button>
+          
           <div className="flex-1" />
           <ThemeToggle />
           {/* Query counter */}
