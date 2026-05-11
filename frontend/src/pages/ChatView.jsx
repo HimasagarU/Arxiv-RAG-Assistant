@@ -139,14 +139,13 @@ export default function ChatView() {
   }
 
   return (
-    <div className="h-screen flex overflow-hidden" style={{ background: 'var(--color-bg-primary)' }}>
+    <div className="h-screen flex overflow-hidden bg-[var(--color-bg-primary)] text-[var(--color-text-primary)]">
       {/* Sidebar */}
       <aside
-        className="flex-shrink-0 border-r flex flex-col transition-all duration-300"
+        className="flex-shrink-0 border-r flex flex-col transition-all duration-300 bg-[var(--color-bg-secondary)]"
         style={{
           width: sidebarOpen ? '280px' : '0px',
           borderColor: 'var(--color-border)',
-          background: 'var(--color-bg-secondary)',
           overflow: 'hidden',
         }}
       >
@@ -203,8 +202,8 @@ export default function ChatView() {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-        <div className="flex items-center gap-3 px-4 py-3 border-b"
-             style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-secondary)' }}>
+           <div className="flex items-center gap-3 px-4 py-3 border-b bg-[var(--color-bg-card)]/90 backdrop-blur"
+             style={{ borderColor: 'var(--color-border)' }}>
           <button onClick={() => setSidebarOpen(!sidebarOpen)}
                   className="text-lg" style={{ color: 'var(--color-text-secondary)' }}>
             {sidebarOpen ? '◀' : '▶'}
@@ -406,7 +405,7 @@ export default function ChatView() {
         </div>
 
         {/* Input */}
-        <div className="border-t px-4 py-4" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-secondary)' }}>
+        <div className="border-t px-4 py-4 bg-[var(--color-bg-card)]/90 backdrop-blur" style={{ borderColor: 'var(--color-border)' }}>
           {error && (
             <div className="max-w-3xl mx-auto mb-3 p-3 rounded-lg text-sm"
                  style={{ background: 'rgba(248, 113, 113, 0.1)', color: 'var(--color-error)', border: '1px solid rgba(248, 113, 113, 0.2)' }}>

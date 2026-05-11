@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import ThemeToggle from '../components/ThemeToggle';
+import { PageHeader, PageShell } from '../components/PageShell';
 
 export default function RegisterPage() {
   const { register } = useAuth();
@@ -28,17 +30,24 @@ export default function RegisterPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4"
-         style={{ background: 'linear-gradient(135deg, var(--color-bg-primary) 0%, #1a1040 50%, var(--color-bg-primary) 100%)' }}>
+    <PageShell>
+      <PageHeader
+        eyebrow="Account"
+        title="Create your account"
+        subtitle="Set up a research workspace for ArXiv RAG Assistant"
+        containerClassName="max-w-4xl"
+        actions={(
+          <>
+            <ThemeToggle />
+            <Link to="/" className="btn-ghost text-sm">
+              ← Home
+            </Link>
+          </>
+        )}
+      />
 
-      <div className="fixed inset-0 overflow-hidden pointer-events-none">
-        <div className="absolute -top-40 -left-40 w-96 h-96 rounded-full opacity-10"
-             style={{ background: 'radial-gradient(circle, #7c3aed, transparent)' }} />
-        <div className="absolute -bottom-40 -right-40 w-96 h-96 rounded-full opacity-10"
-             style={{ background: 'radial-gradient(circle, #6366f1, transparent)' }} />
-      </div>
-
-      <div className="glass-card p-8 w-full max-w-md animate-fade-in relative z-10">
+      <div className="flex items-center justify-center px-4 py-10 sm:py-16">
+        <div className="glass-card relative z-10 w-full max-w-md animate-fade-in p-8">
         <div className="text-center mb-8">
           <h1 className="text-3xl font-bold mb-2"
               style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
@@ -121,7 +130,8 @@ export default function RegisterPage() {
             Sign in
           </Link>
         </p>
+        </div>
       </div>
-    </div>
+    </PageShell>
   );
 }

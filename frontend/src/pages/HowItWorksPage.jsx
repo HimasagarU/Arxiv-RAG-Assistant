@@ -1,5 +1,7 @@
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
+import ThemeToggle from '../components/ThemeToggle';
+import { PageHeader, PageShell } from '../components/PageShell';
 
 const steps = [
   {
@@ -96,7 +98,7 @@ export default function HowItWorksPage() {
   const [selectedImg, setSelectedImg] = useState(null);
 
   return (
-    <div className="min-h-screen relative" style={{ background: 'var(--color-bg-primary)' }}>
+    <PageShell>
       {/* Modal - fixed with very high z-index and portal-like behavior */}
       {selectedImg && (
         <div 
@@ -122,19 +124,27 @@ export default function HowItWorksPage() {
         </div>
       )}
 
-      {/* Header */}
-      <header className="border-b" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-secondary)' }}>
-        <div className="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
-          <Link to="/" className="text-xl font-bold" style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
+      <PageHeader
+        eyebrow="Product Tour"
+        title="How It Works"
+        subtitle="A multi-stage AI pipeline that retrieves, ranks, and synthesizes answers from thousands of research papers on neural network internals."
+        containerClassName="max-w-4xl"
+        leading={(
+          <Link to="/" className="text-xl font-bold text-[var(--color-text-primary)]" style={{ fontFamily: 'var(--font-heading)' }}>
             ArXiv RAG Assistant
           </Link>
-          <Link to="/" className="btn-ghost text-sm">
-            ← Back to App
-          </Link>
-        </div>
-      </header>
+        )}
+        actions={(
+          <>
+            <ThemeToggle />
+            <Link to="/" className="btn-ghost text-sm">
+              ← Back to App
+            </Link>
+          </>
+        )}
+      />
 
-      <main className="max-w-4xl mx-auto px-6 py-12">
+      <main className="mx-auto max-w-4xl px-4 sm:px-6 py-12">
         {/* Hero */}
         <div className="text-center mb-16 animate-fade-in">
           <h1 className="text-4xl font-bold mb-4" style={{ fontFamily: 'var(--font-heading)' }}>
@@ -260,6 +270,6 @@ export default function HowItWorksPage() {
           </Link>
         </div>
       </main>
-    </div>
+    </PageShell>
   );
 }

@@ -3,6 +3,7 @@ import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { listConversations, createConversation, deleteConversation, listDocuments, addDocument, getDocumentStatus } from '../api';
 import ThemeToggle from '../components/ThemeToggle';
+import { PageHeader, PageShell } from '../components/PageShell';
 
 export default function Dashboard() {
   const { user, logout } = useAuth();
@@ -104,20 +105,13 @@ export default function Dashboard() {
   };
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--color-bg-primary)' }}>
-      {/* Header */}
-      <header className="border-b" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-secondary)' }}>
-        <div className="max-w-6xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h1 className="text-xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>
-              ArXiv RAG Assistant
-            </h1>
-            <span className="text-xs px-2 py-0.5 rounded-full"
-                  style={{ background: 'var(--color-accent-glow)', color: 'var(--color-accent)' }}>
-              AI-Powered
-            </span>
-          </div>
-          <div className="flex items-center gap-4">
+    <PageShell>
+      <PageHeader
+        eyebrow="Workspace"
+        title="ArXiv RAG Assistant"
+        subtitle="Manage conversations, add papers, and keep your research workflow in one place."
+        actions={(
+          <>
             <Link to="/how-it-works" className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
               How It Works
             </Link>
@@ -128,11 +122,11 @@ export default function Dashboard() {
             <button onClick={logout} className="btn-ghost text-xs">
               Sign Out
             </button>
-          </div>
-        </div>
-      </header>
+          </>
+        )}
+      />
 
-      <main className="max-w-6xl mx-auto px-6 py-8">
+      <main className="mx-auto max-w-6xl px-4 sm:px-6 py-8">
         {/* Quick Actions */}
         <div className="flex gap-4 mb-8">
           <button id="new-chat-btn" onClick={handleNewChat} className="btn-primary flex items-center gap-2">
@@ -319,6 +313,6 @@ export default function Dashboard() {
           </div>
         </div>
       </main>
-    </div>
+    </PageShell>
   );
 }
