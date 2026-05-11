@@ -127,37 +127,61 @@ export default function HowItWorksPage() {
           <h2 className="text-2xl font-bold mb-8 text-center" style={{ fontFamily: 'var(--font-heading)' }}>
             Core Features & Workflows
           </h2>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="glass-card p-6" style={{ borderColor: 'var(--color-border)' }}>
-              <div className="text-3xl mb-4">💬</div>
-              <h3 className="text-xl font-bold mb-2" style={{ fontFamily: 'var(--font-heading)' }}>General Chat</h3>
-              <p className="text-sm leading-relaxed mb-4" style={{ color: 'var(--color-text-secondary)' }}>
+          <div className="space-y-12">
+            <div className="glass-card p-8" style={{ borderColor: 'var(--color-border)' }}>
+              <div className="flex items-center gap-4 mb-6">
+                <div className="text-4xl">💬</div>
+                <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>General Chat</h3>
+              </div>
+              <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
                 Ask any question about mechanistic interpretability. The system automatically classifies your intent, runs a hybrid search (Dense + BM25) across 3,000+ papers, fuses the results, reranks them using a cross-encoder, and streams a highly accurate answer with direct source citations.
               </p>
+              <div className="rounded-lg overflow-hidden border bg-white" style={{ borderColor: 'var(--color-border)' }}>
+                <img src="/flow-chat.png" alt="General Chat Flow Diagram" className="w-full h-auto object-cover" 
+                     onError={(e) => { e.target.onerror = null; if (e.target.src.endsWith('.png')) { e.target.src = '/flow-chat.jpg'; } else { e.target.style.display = 'none'; } }} />
+              </div>
             </div>
             
-            <div className="glass-card p-6" style={{ borderColor: 'var(--color-border)' }}>
-              <div className="text-3xl mb-4">📥</div>
-              <h3 className="text-xl font-bold mb-2" style={{ fontFamily: 'var(--font-heading)' }}>Add Document</h3>
-              <p className="text-sm leading-relaxed mb-4" style={{ color: 'var(--color-text-secondary)' }}>
+            <div className="glass-card p-8" style={{ borderColor: 'var(--color-border)' }}>
+              <div className="flex items-center gap-4 mb-6">
+                <div className="text-4xl">📥</div>
+                <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>Add Document</h3>
+              </div>
+              <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
                 Submit any ArXiv ID. If it's already in the massive corpus, it bypasses ingestion and is instantly ready. If it's new, the backend downloads the PDF, chunks the text, computes BGE vectors, and dynamically updates the in-memory BM25 index in seconds.
               </p>
+              <div className="rounded-lg overflow-hidden border bg-white" style={{ borderColor: 'var(--color-border)' }}>
+                <img src="/flow-add-doc.png" alt="Add Document Flow Diagram" className="w-full h-auto object-cover" 
+                     onError={(e) => { e.target.onerror = null; if (e.target.src.endsWith('.png')) { e.target.src = '/flow-add-doc.jpg'; } else { e.target.style.display = 'none'; } }} />
+              </div>
             </div>
 
-            <div className="glass-card p-6" style={{ borderColor: 'var(--color-border)' }}>
-              <div className="text-3xl mb-4">📄</div>
-              <h3 className="text-xl font-bold mb-2" style={{ fontFamily: 'var(--font-heading)' }}>Chat with Document</h3>
-              <p className="text-sm leading-relaxed mb-4" style={{ color: 'var(--color-text-secondary)' }}>
+            <div className="glass-card p-8" style={{ borderColor: 'var(--color-border)' }}>
+              <div className="flex items-center gap-4 mb-6">
+                <div className="text-4xl">📄</div>
+                <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>Chat with Document</h3>
+              </div>
+              <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
                 Focus the AI on a single paper. This uses the exact same powerful RAG pipeline as the General Chat, but applies strict metadata filters so the LLM is forced to extract answers exclusively from the selected document's text chunks.
               </p>
+              <div className="rounded-lg overflow-hidden border bg-white" style={{ borderColor: 'var(--color-border)' }}>
+                <img src="/flow-chat-doc.png" alt="Chat with Document Flow Diagram" className="w-full h-auto object-cover" 
+                     onError={(e) => { e.target.onerror = null; if (e.target.src.endsWith('.png')) { e.target.src = '/flow-chat-doc.jpg'; } else { e.target.style.display = 'none'; } }} />
+              </div>
             </div>
 
-            <div className="glass-card p-6" style={{ borderColor: 'var(--color-border)' }}>
-              <div className="text-3xl mb-4">🔗</div>
-              <h3 className="text-xl font-bold mb-2" style={{ fontFamily: 'var(--font-heading)' }}>Similar Papers</h3>
-              <p className="text-sm leading-relaxed mb-4" style={{ color: 'var(--color-text-secondary)' }}>
+            <div className="glass-card p-8" style={{ borderColor: 'var(--color-border)' }}>
+              <div className="flex items-center gap-4 mb-6">
+                <div className="text-4xl">🔗</div>
+                <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>Similar Papers</h3>
+              </div>
+              <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
                 Click "Similar Papers" on any citation to find related research. The backend computes a rapid dense similarity search using the average embeddings of the cited paper against the entire corpus, instantly returning the top 5 nearest neighbors.
               </p>
+              <div className="rounded-lg overflow-hidden border bg-white" style={{ borderColor: 'var(--color-border)' }}>
+                <img src="/flow-similar.png" alt="Similar Papers Flow Diagram" className="w-full h-auto object-cover" 
+                     onError={(e) => { e.target.onerror = null; if (e.target.src.endsWith('.png')) { e.target.src = '/flow-similar.jpg'; } else { e.target.style.display = 'none'; } }} />
+              </div>
             </div>
           </div>
         </div>
