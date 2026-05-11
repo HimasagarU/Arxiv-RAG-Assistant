@@ -827,10 +827,13 @@ class HybridRetriever:
             mean_emb = mean_emb / np.linalg.norm(mean_emb)
 
             # Search for similar
-            log.info(f"Querying Qdrant for similar points...")
+            log.info(f"Querying Qdrant for similar points (excluding {paper_id})...")
             res = self.qdrant_client.query_points(
                 collection_name=COLLECTION_TEXT,
                 query=mean_emb.tolist(),
+                query_filter=Filter(
+                    must_not=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
+                ),
                 limit=top_n * 5,
                 with_payload=True,
             )
