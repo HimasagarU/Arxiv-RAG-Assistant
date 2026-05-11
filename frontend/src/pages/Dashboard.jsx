@@ -14,8 +14,9 @@ export default function Dashboard() {
   const [arxivId, setArxivId] = useState('');
   const [addingDoc, setAddingDoc] = useState(false);
   const [addError, setAddError] = useState('');
-  const [loading, setLoading] = useState(true);
-  const pollingJobsRef = useRef(new Set());
+  const [chatPage, setChatPage] = useState(1);
+  const [docPage, setDocPage] = useState(1);
+  const ITEMS_PER_PAGE = 5;
 
   useEffect(() => {
     loadData();
@@ -206,44 +207,69 @@ export default function Dashboard() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-3">
-                {conversations.map((conv, i) => (
-                  <div
-                    key={conv.id}
-                    className="glass-card p-4 flex items-center justify-between cursor-pointer hover:border-indigo-500/30 transition-all animate-fade-in"
-                    style={{ animationDelay: `${i * 50}ms` }}
-                    onClick={() => navigate(`/chat/${conv.id}`)}
-                  >
-                    <div className="flex-1 min-w-0">
-                      <p className="font-medium truncate" style={{ color: 'var(--color-text-primary)' }}>
-                        {conv.title}
-                      </p>
-                      <div className="flex items-center gap-3 mt-1">
-                        <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                          {conv.message_count} messages
-                        </span>
-                        {conv.paper_id && (
-                          <span className="text-xs px-2 py-0.5 rounded-full"
-                                style={{ background: 'var(--color-accent-glow)', color: 'var(--color-accent)' }}>
-                            📄 {conv.paper_id}
-                          </span>
-                        )}
-                        <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-                          {new Date(conv.updated_at).toLocaleDateString()}
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      onClick={(e) => { e.stopPropagation(); handleDeleteConv(conv.id); }}
-                      className="icon-btn opacity-60 hover:opacity-100 transition-all"
-                      style={{ color: 'var(--color-error)', width: '2rem', height: '2rem' }}
-                      title="Delete"
-                      aria-label="Delete conversation"
+              <div>
+                <div className="space-y-3">
+                  {conversations.slice((chatPage - 1) * ITEMS_PER_PAGE, chatPage * ITEMS_PER_PAGE).map((conv, i) => (
+                    <div
+                      key={conv.id}
+                      className="glass-card p-4 flex items-center justify-between cursor-pointer hover:border-indigo-500/30 transition-all animate-fade-in"
+                      style={{ animationDelay: `${i * 50}ms` }}
+                      onClick={() => navigate(`/chat/${conv.id}`)}
                     >
-                      <span className="text-base leading-none">×</span>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-medium truncate" style={{ color: 'var(--color-text-primary)' }}>
+                          {conv.title}
+                        </p>
+                        <div className="flex items-center gap-3 mt-1">
+                          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                            {conv.message_count} messages
+                          </span>
+                          {conv.paper_id && (
+                            <span className="text-xs px-2 py-0.5 rounded-full"
+                                  style={{ background: 'var(--color-accent-glow)', color: 'var(--color-accent)' }}>
+                              📄 {conv.paper_id}
+                            </span>
+                          )}
+                          <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+                            {new Date(conv.updated_at).toLocaleDateString()}
+                          </span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={(e) => { e.stopPropagation(); handleDeleteConv(conv.id); }}
+                        className="icon-btn opacity-60 hover:opacity-100 transition-all"
+                        style={{ color: 'var(--color-error)', width: '2rem', height: '2rem' }}
+                        title="Delete"
+                        aria-label="Delete conversation"
+                      >
+                        <span className="text-base leading-none">×</span>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                
+                {/* Pagination Controls */}
+                {conversations.length > ITEMS_PER_PAGE && (
+                  <div className="flex justify-between items-center mt-4">
+                    <button
+                      className="btn-soft text-sm"
+                      onClick={() => setChatPage((p) => Math.max(1, p - 1))}
+                      disabled={chatPage === 1}
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                      Page {chatPage} of {Math.ceil(conversations.length / ITEMS_PER_PAGE)}
+                    </span>
+                    <button
+                      className="btn-soft text-sm"
+                      onClick={() => setChatPage((p) => Math.min(Math.ceil(conversations.length / ITEMS_PER_PAGE), p + 1))}
+                      disabled={chatPage === Math.ceil(conversations.length / ITEMS_PER_PAGE)}
+                    >
+                      Next
                     </button>
                   </div>
-                ))}
+                )}
               </div>
             )}
           </div>
@@ -261,59 +287,84 @@ export default function Dashboard() {
                 </p>
               </div>
             ) : (
-              <div className="space-y-3">
-                {documents.map((doc, i) => {
-                  const cfg = statusConfig[doc.status] || statusConfig.queued;
-                  const isProcessing = !['done', 'failed'].includes(doc.status);
-                  return (
-                    <div
-                      key={doc.id}
-                      className="glass-card p-4 animate-fade-in"
-                      style={{ animationDelay: `${i * 50}ms` }}
-                    >
-                      <div className="flex items-start justify-between mb-2">
-                        <p className="font-medium text-sm truncate flex-1"
-                           style={{ color: 'var(--color-text-primary)' }}>
-                          {doc.title || doc.arxiv_id}
+              <div>
+                <div className="space-y-3">
+                  {documents.slice((docPage - 1) * ITEMS_PER_PAGE, docPage * ITEMS_PER_PAGE).map((doc, i) => {
+                    const cfg = statusConfig[doc.status] || statusConfig.queued;
+                    const isProcessing = !['done', 'failed'].includes(doc.status);
+                    return (
+                      <div
+                        key={doc.id}
+                        className="glass-card p-4 animate-fade-in"
+                        style={{ animationDelay: `${i * 50}ms` }}
+                      >
+                        <div className="flex items-start justify-between mb-2">
+                          <p className="font-medium text-sm truncate flex-1"
+                             style={{ color: 'var(--color-text-primary)' }}>
+                            {doc.title || doc.arxiv_id}
+                          </p>
+                          <span className="text-lg ml-2">{cfg.icon}</span>
+                        </div>
+                        <p className="text-xs mb-2" style={{ color: 'var(--color-text-muted)' }}>
+                          {doc.arxiv_id}
                         </p>
-                        <span className="text-lg ml-2">{cfg.icon}</span>
-                      </div>
-                      <p className="text-xs mb-2" style={{ color: 'var(--color-text-muted)' }}>
-                        {doc.arxiv_id}
-                      </p>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-medium" style={{ color: cfg.color }}>
-                          {cfg.label}
-                        </span>
-                        {isProcessing && (
-                          <div className="w-3 h-3 border border-t-transparent rounded-full"
-                               style={{ borderColor: cfg.color, borderTopColor: 'transparent', animation: 'spin-slow 1s linear infinite' }} />
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-medium" style={{ color: cfg.color }}>
+                            {cfg.label}
+                          </span>
+                          {isProcessing && (
+                            <div className="w-3 h-3 border border-t-transparent rounded-full"
+                                 style={{ borderColor: cfg.color, borderTopColor: 'transparent', animation: 'spin-slow 1s linear infinite' }} />
+                          )}
+                        </div>
+                        {doc.status === 'done' && doc.chunks_created > 0 && (
+                          <p className="text-xs mt-1" style={{ color: 'var(--color-success)' }}>
+                            {doc.chunks_created} chunks indexed
+                          </p>
+                        )}
+                        {doc.status === 'failed' && doc.error_message && (
+                          <p className="text-xs mt-1" style={{ color: 'var(--color-error)' }}>
+                            {doc.error_message}
+                          </p>
+                        )}
+                        {doc.status === 'done' && (
+                          <button
+                            className="btn-soft text-xs mt-2 w-full"
+                            onClick={async () => {
+                              const conv = await createConversation(`Chat: ${doc.title || doc.arxiv_id}`, doc.arxiv_id);
+                              navigate(`/chat/${conv.id}`);
+                            }}
+                          >
+                            💬 Chat with this paper
+                          </button>
                         )}
                       </div>
-                      {doc.status === 'done' && doc.chunks_created > 0 && (
-                        <p className="text-xs mt-1" style={{ color: 'var(--color-success)' }}>
-                          {doc.chunks_created} chunks indexed
-                        </p>
-                      )}
-                      {doc.status === 'failed' && doc.error_message && (
-                        <p className="text-xs mt-1" style={{ color: 'var(--color-error)' }}>
-                          {doc.error_message}
-                        </p>
-                      )}
-                      {doc.status === 'done' && (
-                        <button
-                          className="btn-ghost text-xs mt-2 w-full"
-                          onClick={async () => {
-                            const conv = await createConversation(`Chat: ${doc.title || doc.arxiv_id}`, doc.arxiv_id);
-                            navigate(`/chat/${conv.id}`);
-                          }}
-                        >
-                          💬 Chat with this paper
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  })}
+                </div>
+                
+                {/* Pagination Controls */}
+                {documents.length > ITEMS_PER_PAGE && (
+                  <div className="flex justify-between items-center mt-4">
+                    <button
+                      className="btn-soft text-sm"
+                      onClick={() => setDocPage((p) => Math.max(1, p - 1))}
+                      disabled={docPage === 1}
+                    >
+                      Previous
+                    </button>
+                    <span className="text-sm" style={{ color: 'var(--color-text-secondary)' }}>
+                      Page {docPage} of {Math.ceil(documents.length / ITEMS_PER_PAGE)}
+                    </span>
+                    <button
+                      className="btn-soft text-sm"
+                      onClick={() => setDocPage((p) => Math.min(Math.ceil(documents.length / ITEMS_PER_PAGE), p + 1))}
+                      disabled={docPage === Math.ceil(documents.length / ITEMS_PER_PAGE)}
+                    >
+                      Next
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

@@ -148,16 +148,7 @@ export default function HowItWorksPage() {
       />
 
       <main className="mx-auto max-w-4xl px-4 sm:px-6 py-12">
-        {/* Hero */}
-        <div className="text-center mb-16 animate-fade-in">
-          <h1 className="text-4xl font-bold mb-4" style={{ fontFamily: 'var(--font-heading)' }}>
-            How It Works
-          </h1>
-          <p className="text-lg max-w-2xl mx-auto" style={{ color: 'var(--color-text-secondary)' }}>
-            A multi-stage AI pipeline that retrieves, ranks, and synthesizes answers
-            from thousands of research papers on neural network internals.
-          </p>
-        </div>
+
 
         {/* Architecture summary */}
         <div className="mt-12 glass-card p-8 text-center animate-fade-in" style={{ animationDelay: '300ms' }}>
