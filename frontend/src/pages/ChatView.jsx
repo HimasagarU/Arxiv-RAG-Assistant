@@ -27,36 +27,38 @@ export default function ChatView() {
   const queryCount = Math.floor(messages.filter((m) => m.role === 'user').length);
 
   useEffect(() => {
-    loadConversations();
+    async function fetchConversations() {
+      try {
+        const convs = await listConversations();
+        setConversations(convs);
+      } catch (err) {
+        console.error('Failed to load conversations', err);
+      }
+    }
+
+    fetchConversations();
   }, []);
 
   useEffect(() => {
-    loadMessages();
+    async function fetchMessages() {
+      setLoading(true);
+      setError('');
+      try {
+        const msgs = await getMessages(conversationId);
+        setMessages(msgs);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    fetchMessages();
   }, [conversationId]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
-
-  async function loadConversations() {
-    try {
-      const convs = await listConversations();
-      setConversations(convs);
-    } catch { }
-  }
-
-  async function loadMessages() {
-    setLoading(true);
-    setError('');
-    try {
-      const msgs = await getMessages(conversationId);
-      setMessages(msgs);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }
 
   async function handleSend(e) {
     e.preventDefault();
@@ -78,7 +80,8 @@ export default function ChatView() {
         id: `res-${Date.now()}`,
       };
       setMessages((prev) => [...prev, assistantMsg]);
-      loadConversations(); // refresh sidebar titles
+      const convs = await listConversations();
+      setConversations(convs);
     } catch (err) {
       setError(err.message);
       // Remove the optimistic user message on failure
@@ -93,9 +96,12 @@ export default function ChatView() {
   async function handleNewChat() {
     try {
       const conv = await createConversation();
-      loadConversations();
+      const convs = await listConversations();
+      setConversations(convs);
       navigate(`/chat/${conv.id}`);
-    } catch { }
+    } catch (err) {
+      console.error('Failed to create conversation', err);
+    }
   }
 
   async function handleDeleteConv(id) {
@@ -103,7 +109,9 @@ export default function ChatView() {
       await deleteConversation(id);
       setConversations((prev) => prev.filter((c) => c.id !== id));
       if (id === conversationId) navigate('/');
-    } catch { }
+    } catch (err) {
+      console.error('Failed to delete conversation', err);
+    }
   }
 
   function parseSources(sourcesJson) {
@@ -150,27 +158,32 @@ export default function ChatView() {
         }}
       >
         <div className="p-4 border-b" style={{ borderColor: 'var(--color-border)' }}>
-          <Link to="/dashboard" className="text-lg font-bold block mb-3" style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
-            ArXiv RAG
-          </Link>
-          <button id="sidebar-new-chat" onClick={handleNewChat} className="btn-primary w-full text-sm">
-            + New Conversation
-          </button>
+          <div className="flex items-center gap-3">
+            <Link to="/dashboard" className="min-w-0 flex-1 text-lg font-bold leading-none" style={{ fontFamily: 'var(--font-heading)', color: 'var(--color-text-primary)' }}>
+              ArXiv RAG
+            </Link>
+            <button
+              id="sidebar-new-chat"
+              onClick={handleNewChat}
+              className="btn-primary shrink-0 px-3 py-2 text-sm"
+            >
+              + New Conversation
+            </button>
+          </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-1">
+        <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {conversations.map((conv) => (
             <div
               key={conv.id}
-              className={`p-3 rounded-lg cursor-pointer flex items-center justify-between group transition-colors ${conv.id === conversationId ? '' : ''}`}
+              className={`p-3 rounded-xl cursor-pointer flex items-start justify-between gap-3 group transition-colors border ${conv.id === conversationId ? 'bg-[var(--color-bg-hover)] border-[var(--color-border)]' : 'bg-transparent border-transparent hover:bg-[var(--color-bg-hover)] hover:border-[var(--color-border)]'}`}
               style={{
-                background: conv.id === conversationId ? 'var(--color-bg-hover)' : 'transparent',
                 color: conv.id === conversationId ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
               }}
               onClick={() => navigate(`/chat/${conv.id}`)}
             >
               <div className="flex-1 min-w-0">
-                <p className="text-sm truncate">{conv.title}</p>
+                <p className="text-sm font-medium truncate leading-snug">{conv.title}</p>
                 <p className="text-xs mt-0.5" style={{ color: 'var(--color-text-muted)' }}>
                   {conv.message_count} msgs
                   {conv.paper_id && ` · 📄`}
@@ -178,22 +191,29 @@ export default function ChatView() {
               </div>
               <button
                 onClick={(e) => { e.stopPropagation(); handleDeleteConv(conv.id); }}
-                className="opacity-0 group-hover:opacity-100 text-xs px-1 transition-opacity"
+                className="icon-btn opacity-0 group-hover:opacity-100 transition-all text-xs"
                 style={{ color: 'var(--color-error)' }}
+                title="Delete conversation"
+                aria-label="Delete conversation"
               >
-                ×
+                <span className="text-base leading-none">×</span>
               </button>
             </div>
           ))}
         </div>
 
         <div className="p-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
-          <div className="flex items-center justify-between">
-            <span className="text-xs truncate" style={{ color: 'var(--color-text-muted)' }}>
-              {user?.display_name}
-            </span>
-            <button onClick={logout} className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
-              Sign Out
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1 rounded-xl border px-3 py-2" style={{ borderColor: 'var(--color-border)', background: 'var(--color-bg-card)' }}>
+              <p className="text-[11px] uppercase tracking-[0.18em]" style={{ color: 'var(--color-text-muted)' }}>
+                Signed in as
+              </p>
+              <p className="truncate text-sm font-medium" style={{ color: 'var(--color-text-primary)' }}>
+                {user?.display_name}
+              </p>
+            </div>
+            <button onClick={logout} className="btn-soft shrink-0 px-3 py-2 text-sm">
+              Sign out
             </button>
           </div>
         </div>
@@ -202,10 +222,9 @@ export default function ChatView() {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Top bar */}
-           <div className="flex items-center gap-3 px-4 py-3 border-b bg-[var(--color-bg-card)]/90 backdrop-blur"
+        <div className="flex items-center gap-3 px-4 py-3 border-b bg-[var(--color-bg-card)]/90 backdrop-blur"
              style={{ borderColor: 'var(--color-border)' }}>
-          <button onClick={() => setSidebarOpen(!sidebarOpen)}
-                  className="text-lg" style={{ color: 'var(--color-text-secondary)' }}>
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="icon-btn text-lg" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}>
             {sidebarOpen ? '◀' : '▶'}
           </button>
           
@@ -234,7 +253,7 @@ export default function ChatView() {
               {queryCount}/{MAX_QUERIES} queries
             </span>
           </div>
-          <Link to="/how-it-works" className="text-xs" style={{ color: 'var(--color-text-muted)' }}>
+          <Link to="/how-it-works" className="btn-ghost text-xs px-3 py-2" style={{ color: 'var(--color-text-secondary)' }}>
             How It Works
           </Link>
         </div>
@@ -301,10 +320,11 @@ export default function ChatView() {
                                 {sources.map((src, si) => (
                                   <div key={si}>
                                     <button
-                                      className="text-xs text-left w-full p-2 rounded-lg transition-colors"
+                                      className="text-xs text-left w-full p-2 rounded-lg transition-colors border"
                                       style={{
                                         background: expandedSource === `${i}-${si}` ? 'var(--color-bg-hover)' : 'transparent',
                                         color: 'var(--color-accent)',
+                                        borderColor: 'transparent',
                                       }}
                                       onClick={() => setExpandedSource(expandedSource === `${i}-${si}` ? null : `${i}-${si}`)}
                                     >
@@ -353,7 +373,7 @@ export default function ChatView() {
                                                 <p className="text-[11px] font-semibold mb-1" style={{ color: 'var(--color-text-primary)' }}>Similar Papers:</p>
                                                 {similarPapers[`${i}-${si}`].map((p, idx) => (
                                                   <div key={idx} className="flex justify-between items-center bg-[var(--color-bg-secondary)] p-1.5 rounded">
-                                                    <a href={`https://arxiv.org/abs/${p.paper_id}`} target="_blank" rel="noopener noreferrer"
+                                                     <a href={`https://arxiv.org/abs/${p.paper_id}`} target="_blank" rel="noopener noreferrer"
                                                        className="truncate flex-1 text-[11px] hover:underline" style={{ color: 'var(--color-accent)' }}>
                                                       {p.title}
                                                     </a>

@@ -111,8 +111,8 @@ export default function LoginPage() {
         </p>
 
         <div className="mt-4 text-center">
-          <Link to="/how-it-works" className="text-sm" style={{ color: 'var(--color-text-muted)' }}>
-            How does this work? →
+          <Link to="/how-it-works" className="btn-ghost text-sm px-4 py-2" style={{ color: 'var(--color-text-secondary)' }}>
+            How it works ↗
           </Link>
         </div>
         </div>

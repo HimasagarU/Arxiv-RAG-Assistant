@@ -119,13 +119,18 @@ h1, h2, h3, h4 {
 .btn-primary {
   background: var(--color-accent);
   color: #fff;
-  padding: 0.625rem 1.5rem;
-  border-radius: 8px;
+  padding: 0.7rem 1.25rem;
+  border-radius: 10px;
   font-weight: 600;
   font-size: 0.875rem;
   transition: all 0.2s ease;
   border: none;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  line-height: 1;
 }
 .btn-primary:hover {
   background: var(--color-accent-hover);
@@ -142,18 +147,64 @@ h1, h2, h3, h4 {
 .btn-ghost {
   background: transparent;
   color: var(--color-text-secondary);
-  padding: 0.5rem 1rem;
-  border-radius: 8px;
+  padding: 0.7rem 1rem;
+  border-radius: 10px;
   font-weight: 500;
   font-size: 0.875rem;
   border: 1px solid var(--color-border);
   cursor: pointer;
   transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  line-height: 1;
 }
 .btn-ghost:hover {
   background: var(--color-bg-hover);
   color: var(--color-text-primary);
   border-color: var(--color-accent);
+}
+
+.btn-soft {
+  background: color-mix(in srgb, var(--color-accent) 8%, var(--color-bg-card));
+  color: var(--color-text-primary);
+  padding: 0.7rem 1rem;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 0.875rem;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 22%, var(--color-border));
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  line-height: 1;
+}
+.btn-soft:hover {
+  background: color-mix(in srgb, var(--color-accent) 12%, var(--color-bg-card));
+  border-color: var(--color-accent);
+  transform: translateY(-1px);
+}
+
+.icon-btn {
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  border-radius: 9999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg-card);
+  color: var(--color-text-secondary);
+  transition: all 0.2s ease;
+}
+.icon-btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text-primary);
+  background: var(--color-bg-hover);
 }
 
 /* ============================================================
