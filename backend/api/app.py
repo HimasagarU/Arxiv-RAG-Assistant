@@ -31,6 +31,10 @@ from pydantic import BaseModel, Field
 
 load_dotenv()
 
+import sys
+# Ensure project root is in sys.path so 'db' and 'api' can be imported
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
