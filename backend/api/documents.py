@@ -14,6 +14,8 @@ import logging
 import os
 import time
 import threading
+import sys
+from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
@@ -85,6 +87,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
     because FastAPI BackgroundTasks don't support async well
     on HuggingFace Spaces.
     """
+    backend_root = str(Path(__file__).resolve().parent.parent)
+    if backend_root not in sys.path:
+        sys.path.insert(0, backend_root)
+
     import psycopg
     from psycopg.rows import dict_row
 
