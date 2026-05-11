@@ -20,28 +20,31 @@ The ArXiv RAG Assistant is a specialized, production-grade Retrieval-Augmented G
 flowchart TD
     %% Offline Pipeline
     subgraph Offline [Offline Ingestion Pipeline]
-        A[Seed Papers & arXiv Keywords] --> B(Semantic Scholar Citation Expansion)
-        B --> C[PostgreSQL Data Warehouse]
+        A[Seed Papers / arXiv] --> B(Semantic Scholar Citation Expansion)
+        B --> C[(NeonDB Serverless PostgreSQL)]
         C --> D(PyMuPDF Full Text Extraction)
-        D --> E(Text Chunking & Normalization)
+        D --> E(Semantic Chunking & Normalization)
         E --> F1[(Qdrant Cloud Dense Index)]
         E --> F2[(BM25 Artifacts)]
+        E -.-> CF[Cloudflare R2 Storage]
     end
 
     %% Live API Pipeline
     subgraph Live [Live Backend API]
         G(Query Intent Classifier) --> H[Hybrid Retriever]
-        F1 -.-> H
-        F2 -.-> H
+        F1 -.->|BAAI/bge-large-en-v1.5| H
+        F2 -.->|BM25Okapi| H
         H --> I(Reciprocal Rank Fusion)
         I --> J(Cross-Encoder Reranker)
-        J --> K(Context Compression)
+        J -.->|ms-marco-MiniLM-L-6| K(Context Compression)
         K --> L[Groq / Llama 3.3 70B]
     end
 
-    %% Frontend
+    %% Frontend & Auth
     subgraph Frontend [React Web UI]
         M((User Query)) --> N{FastAPI Server}
+        SB[(Supabase)] -. Auth & Chats .-> N
+        RC[(Redis Cache)] -. API Caching .-> N
         N --> G
         L -. SSE Stream .-> N
         N --> O((Answers & Citations))
@@ -101,26 +104,82 @@ The presentation layer is a React-based single-page web application housed in `f
 ## Core User Workflows
 
 ### 💬 General Chat
-1. **Query Intent Classification**: The user submits a question. A regex-based classifier determines the intent (e.g., `explanatory`, `discovery`).
-2. **Hybrid Retrieval**: The query is sent to both Qdrant Cloud (Dense vectors) and the local BM25 index (Lexical matching).
-3. **Reciprocal Rank Fusion (RRF)**: The dense and lexical scores are fused together, weighted based on the query's intent.
-4. **Cross-Encoder Reranking**: The fused candidates are reranked using a lightweight cross-encoder model to maximize precision.
-5. **LLM Generation**: The top compressed contexts are sent to Groq (Llama 3.3 70B), which streams back the answer and structured citations via SSE.
+
+```mermaid
+flowchart LR
+    A((User Query)) --> B{FastAPI Server}
+    B --> C{Redis Cache Check}
+    C -->|Miss| D[Query Intent Classifier]
+    D --> E[Hybrid Retrieval]
+    
+    subgraph Retrieval [Retrieval & Reranking]
+        E -->|Dense Search| F1[(Qdrant HNSW)]
+        E -->|Lexical Search| F2[(In-Memory BM25)]
+        F1 --> G[Reciprocal Rank Fusion]
+        F2 --> G
+        G --> H[Cross-Encoder Reranker]
+    end
+    
+    H --> I[Prompt Builder]
+    I --> J[Groq LLM]
+    J -. SSE Stream .-> A
+```
 
 ### 📥 Add Document
-1. **Corpus Check**: The backend checks the fast in-memory `papers_meta` and the NeonDB. If the ArXiv ID exists, it instantly returns a successful status.
-2. **Processing**: If it's a new paper, the PDF is downloaded, parsed via PyMuPDF, and split into 450-token semantic chunks.
-3. **Embedding**: The text chunks are embedded using BGE-Large-EN-v1.5 and pushed to Qdrant Cloud.
-4. **Dynamic Update**: The in-memory BM25 index and metadata dictionaries are dynamically updated without a restart, and the changes are persisted to the local artifact JSON files.
+
+```mermaid
+flowchart TD
+    A((Submit ArXiv ID)) --> B{Corpus Duplicate Check}
+    B -->|Exists| C(Instantly Return Ready)
+    B -->|New| D[Download PDF from ArXiv]
+    
+    subgraph Processing [Ingestion Pipeline]
+        D --> E[PyMuPDF Text Extraction]
+        E --> F[Semantic Text Chunking]
+        F --> G[BGE-Large Vector Embedding]
+        G --> H[(Qdrant Cloud Upsert)]
+        G --> I[(NeonDB Upsert)]
+    end
+    
+    H --> J[Dynamic In-Memory Update]
+    I --> J
+    J -->|Persist JSON/BM25| K[(Cloudflare R2 & Local Storage)]
+```
 
 ### 📄 Chat with Document
-1. **Metadata Filtering**: When chatting with a specific document, the exact same Hybrid Retrieval pipeline from the "General Chat" is used, but a strict `paper_id` filter is applied to both Qdrant and BM25 searches.
-2. **Isolated Context**: The LLM is forced to exclusively use the compressed text from the selected document, completely isolating it from the broader RAG corpus.
+
+```mermaid
+flowchart LR
+    A((Document Query)) --> B{FastAPI Server}
+    B --> C[Intent Classifier]
+    C --> D[Hybrid Retrieval]
+    
+    subgraph Isolated Retrieval [Strict Metadata Filter applied]
+        D -->|Filter: paper_id| F1[(Qdrant Document Vectors)]
+        D -->|Filter: paper_id| F2[(BM25 Document Chunks)]
+    end
+    
+    F1 --> G[Cross-Encoder Reranking]
+    F2 --> G
+    G --> H[Prompt Builder]
+    H --> I[Groq LLM]
+    I -. Stream .-> A
+```
 
 ### 🔗 Similar Papers
-1. **Mean Embedding Lookup**: When a user clicks "Similar Papers" on a citation, the backend retrieves the cached average embedding of the cited paper.
-2. **Dense Similarity Search**: A fast cosine similarity search is performed against the mean embeddings of all other 3000+ papers in the Qdrant cluster.
-3. **Recommendation**: The top 5 nearest neighbors are returned and displayed in the frontend as interactive paper cards.
+
+```mermaid
+flowchart TD
+    A((Click 'Similar Papers')) --> B[Lookup Cached Mean Embedding]
+    B --> C[(Qdrant Cloud)]
+    
+    subgraph Search [Vector Similarity]
+        C --> D{Cosine Similarity Search}
+        D -->|Exclude self| E[Rank Top 5 Neighbors]
+    end
+    
+    E --> F((Return Paper Cards to React UI))
+```
 
 ## Key Features
 
