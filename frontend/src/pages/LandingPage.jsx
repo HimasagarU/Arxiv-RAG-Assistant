@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ThemeToggle from '../components/ThemeToggle';
 import { useAuth } from '../context/AuthContext';
@@ -39,7 +39,7 @@ function LandingPage() {
         setChunksCount(textCount);
         setPapersCount(data.db_papers || 0);
         setStatus('connected');
-      } catch (e) {
+      } catch {
         setStatus('offline');
       }
     }
@@ -91,7 +91,7 @@ function LandingPage() {
     }
   };
 
-  const useSample = (text) => {
+  const applySample = (text) => {
     setQuery(text);
   };
 
@@ -109,7 +109,6 @@ function LandingPage() {
       <PageHeader
         eyebrow="Hybrid RAG"
         title="ArXiv Research Assistant"
-        subtitle="Ask questions about transformer circuits, sparse autoencoders, activation patching, and more. Powered by hybrid dense + BM25 retrieval with cross-encoder reranking."
         actions={(
           <>
             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${
@@ -133,10 +132,10 @@ function LandingPage() {
               ) : (
                 <>
                   <Link to="/login" className="btn-ghost">
-                    Sign In
+                    Sign in
                   </Link>
                   <Link to="/register" className="btn-primary">
-                    Sign Up
+                    Create account
                   </Link>
                 </>
               )}
@@ -150,7 +149,7 @@ function LandingPage() {
         <section className="text-center mb-10">
           <h2 className="font-heading text-4xl font-bold mb-3 text-[var(--color-text-primary)]">Mechanistic Interpretability Research</h2>
           <p className="text-[var(--color-text-secondary)] max-w-2xl mx-auto">
-            Ask questions about transformer circuits, sparse autoencoders, activation patching, and more. 
+            Ask questions about transformer circuits, sparse autoencoders, activation patching, and more.
             Powered by hybrid dense + BM25 retrieval with cross-encoder reranking.
           </p>
         </section>
@@ -256,7 +255,7 @@ function LandingPage() {
           ].map((text, i) => (
             <button
               key={i}
-              onClick={() => useSample(text)}
+              onClick={() => applySample(text)}
               className="px-4 py-2 text-sm bg-[var(--color-bg-card)] border border-[var(--color-border)] rounded-full text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] transition-colors"
             >
               {text}

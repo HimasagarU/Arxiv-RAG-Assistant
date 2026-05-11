@@ -8,11 +8,11 @@ pinned: false
 ---
 # ArXiv RAG Assistant — Mechanistic Interpretability
 
-A production-grade **Retrieval-Augmented Generation (RAG)** system specialized for **mechanistic interpretability** research. Built around a curated corpus of transformer circuits, sparse autoencoders, activation patching, and related papers spanning 2017–2025.
+A **Retrieval-Augmented Generation (RAG)** system specialized for **mechanistic interpretability** research. Built around a curated corpus of transformer circuits, sparse autoencoders, activation patching, and related papers spanning 2017–2025, it helps researchers navigate the complex landscape of neural network internals.
 
 ## Architecture
 
-The ArXiv RAG Assistant is a specialized, production-grade Retrieval-Augmented Generation (RAG) system built to query mechanistic interpretability research. It relies on a multi-stage architecture split broadly into an **Offline Ingestion & Indexing Pipeline** and a **Live Hybrid RAG Backend**.
+The ArXiv RAG Assistant is a specialized Retrieval-Augmented Generation (RAG) system built to query mechanistic interpretability research. It relies on a multi-stage architecture split broadly into an **Offline Ingestion & Indexing Pipeline** and a **Live Hybrid RAG Backend**.
 
 ### 1. High-Level System Flow
 
@@ -236,7 +236,8 @@ rerank/
   reranker.py             Cross-encoder reranking (ms-marco-MiniLM-L-6-v2)
   evaluate.py             Retrieval evaluation metrics (Recall, MRR, latency, RAM)
 frontend/
-  index.html              Web UI (single-page, academic theme)
+  src/                    React source code (Pages, Components, Contexts)
+  public/                 Static assets (including landing page)
 data/                     (Generated) Artifacts and metadata mapping
 scripts/
   upload_artifacts.py     Cloudflare R2 artifact uploader
@@ -319,6 +320,14 @@ python index/build_bm25.py
 
 ```bash
 uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
+```
+
+### 5. Start Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
 ### 5. Docker Deployment

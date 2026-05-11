@@ -8,9 +8,9 @@ const steps = [
     icon: '📥',
     title: 'Paper Ingestion',
     description:
-      'Papers are fetched from ArXiv, their PDFs are downloaded and stored in Cloudflare R2. ' +
-      'Full text is extracted using PyMuPDF and intelligently chunked into semantic passages ' +
-      'with section-aware splitting (abstract, methods, results, etc.).',
+      'We continuously monitor ArXiv for the latest research on transformer circuits and sparse autoencoders. ' +
+      'PDFs are parsed with high precision, extracting the core text while preserving section hierarchy ' +
+      '(Abstract, Methods, Results) for optimal context retrieval.',
     details: ['~3,000+ papers indexed', 'Section-aware chunking', 'PDF storage on Cloudflare R2'],
     color: '#4f46e5',
   },
@@ -18,8 +18,9 @@ const steps = [
     icon: '🧬',
     title: 'Vector Embedding',
     description:
-      'Each text chunk is embedded using BGE-Large-EN-v1.5, a state-of-the-art sentence transformer. ' +
-      'The 1024-dimensional vectors are stored in Qdrant Cloud for fast approximate nearest neighbor search.',
+      'Text chunks are transformed into 1024-dimensional semantic vectors using the advanced BGE-Large model. ' +
+      'This allows the system to understand complex concepts like "activation patching" or "induction heads" ' +
+      'even if you use different words.',
     details: ['BGE-Large-EN-v1.5 embeddings', '1024-dimensional vectors', 'Qdrant Cloud vector DB'],
     color: '#6366f1',
   },
@@ -27,9 +28,9 @@ const steps = [
     icon: '🔍',
     title: 'Hybrid Retrieval',
     description:
-      'When you ask a question, two retrieval paths run simultaneously: dense retrieval (semantic similarity ' +
-      'via Qdrant) and lexical retrieval (keyword matching via BM25 lexical retrieval). ' +
-      'Results are fused using Reciprocal Rank Fusion (RRF) with intent-aware weights.',
+      'To ensure no insight is missed, we run a dual-track retrieval pipeline. Dense search finds conceptually ' +
+      'related passages in Qdrant, while precision BM25 search catches exact technical terms and specific equations. ' +
+      'Reciprocal Rank Fusion (RRF) then merges them into a perfect candidate list.',
     details: ['Dense + Lexical fusion (RRF)', 'Intent-classified weighting', 'BM25 lexical retrieval'],
     color: '#7c3aed',
   },
@@ -37,18 +38,20 @@ const steps = [
     icon: '⚖️',
     title: 'Cross-Encoder Reranking',
     description:
-      'The fused candidates are scored by a cross-encoder (MiniLM-L6) that evaluates the direct ' +
-      'relevance of each passage to your query. This dramatically improves precision over raw retrieval scores.',
+      'The combined list is passed through a deep Cross-Encoder model. Unlike standard search, it evaluates ' +
+      'the precise relationship between your specific question and each passage, re-ordering them to put ' +
+      'the most directly relevant insights at the very top.',
     details: ['ms-marco-MiniLM-L-6-v2', 'Direct query-passage scoring', 'Top-5 passage selection'],
+    color: '#8b5cf6',
     color: '#8b5cf6',
   },
   {
     icon: '🤖',
     title: 'Answer Generation',
     description:
-      'The top passages are compressed and sent to Llama 3.3 70B (via Groq) with a carefully engineered ' +
-      'prompt that enforces source citations, structured formatting, and honest uncertainty when information ' +
-      'is insufficient.',
+      'Finally, the highly curated passages are provided to Llama 3.3 (70B) via Groq\'s ultra-fast inference engine. ' +
+      'The model synthesizes a comprehensive answer, complete with inline citations, code snippets, and a clear ' +
+      'admission of uncertainty if the papers don\'t contain the answer.',
     details: ['Llama 3.3 70B Versatile', 'Grounded answers with citations', 'Intent-specific prompts'],
     color: '#9333ea',
   },
@@ -200,8 +203,19 @@ export default function HowItWorksPage() {
           </div>
         </div>
 
+        {/* Architecture summary */}
+        <div className="mt-16 glass-card p-8 text-center animate-fade-in" style={{ animationDelay: '400ms' }}>
+          <h2 className="text-2xl font-bold mb-6" style={{ fontFamily: 'var(--font-heading)' }}>
+            System Architecture
+          </h2>
+          <ImageExpandable src="/architecture.png" alt="System Architecture Diagram" onExpand={setSelectedImg} />
+          <p className="text-sm mt-6" style={{ color: 'var(--color-text-muted)' }}>
+            Built with FastAPI · Qdrant Cloud · Groq · React
+          </p>
+        </div>
+
         {/* Feature Workflows */}
-        <div className="mt-20 animate-fade-in" style={{ animationDelay: '400ms' }}>
+        <div className="mt-20 animate-fade-in" style={{ animationDelay: '500ms' }}>
           <h2 className="text-2xl font-bold mb-8 text-center" style={{ fontFamily: 'var(--font-heading)' }}>
             Core Features & Workflows
           </h2>
@@ -212,7 +226,7 @@ export default function HowItWorksPage() {
                 <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>General Chat</h3>
               </div>
               <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-                Ask any question about mechanistic interpretability. The system automatically classifies your intent, runs a hybrid search (Dense + BM25) across 3,000+ papers, fuses the results, reranks them using a cross-encoder, and streams a highly accurate answer with direct source citations.
+                Explore the depths of neural network internals. Ask broad or specific questions about transformer circuits, superposition, or feature visualization. The pipeline will synthesize an answer across the entire corpus of 3,000+ papers.
               </p>
               <ImageExpandable src="/flow-chat.png" alt="General Chat Flow Diagram" onExpand={setSelectedImg} />
             </div>
@@ -223,7 +237,7 @@ export default function HowItWorksPage() {
                 <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>Add Document</h3>
               </div>
               <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-                Submit any ArXiv ID. If it's already in the massive corpus, it bypasses ingestion and is instantly ready. If it's new, the backend downloads the PDF, chunks the text, computes BGE vectors, and dynamically updates the in-memory BM25 index in seconds.
+                Found a brand new paper on ArXiv? Simply drop the ID here. The system will pull the PDF, run it through the extraction and embedding pipeline, and make it searchable in seconds—expanding the collective knowledge base.
               </p>
               <ImageExpandable src="/flow-add-doc.png" alt="Add Document Flow Diagram" onExpand={setSelectedImg} />
             </div>
@@ -234,7 +248,7 @@ export default function HowItWorksPage() {
                 <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>Chat with Document</h3>
               </div>
               <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-                Focus the AI on a single paper. This uses the exact same powerful RAG pipeline as the General Chat, but applies strict metadata filters so the LLM is forced to extract answers exclusively from the selected document's text chunks.
+                Deep dive into a specific study. By locking the context to a single paper, the AI becomes a dedicated expert on that specific methodology, helping you extract figures, understand proofs, or summarize findings without outside noise.
               </p>
               <ImageExpandable src="/flow-chat-doc.png" alt="Chat with Document Flow Diagram" onExpand={setSelectedImg} />
             </div>
@@ -245,22 +259,11 @@ export default function HowItWorksPage() {
                 <h3 className="text-2xl font-bold" style={{ fontFamily: 'var(--font-heading)' }}>Similar Papers</h3>
               </div>
               <p className="text-lg leading-relaxed mb-6" style={{ color: 'var(--color-text-secondary)' }}>
-                Click "Similar Papers" on any citation to find related research. The backend computes a rapid dense similarity search using the average embeddings of the cited paper against the entire corpus, instantly returning the top 5 nearest neighbors.
+                Accelerate your literature review. By computing the average vector space of a paper's chunks, we can instantly locate other studies in the corpus that explore similar phenomena or use related techniques.
               </p>
               <ImageExpandable src="/flow-similar.png" alt="Similar Papers Flow Diagram" onExpand={setSelectedImg} />
             </div>
           </div>
-        </div>
-
-        {/* Architecture summary */}
-        <div className="mt-16 glass-card p-8 text-center animate-fade-in" style={{ animationDelay: '500ms' }}>
-          <h2 className="text-2xl font-bold mb-6" style={{ fontFamily: 'var(--font-heading)' }}>
-            System Architecture
-          </h2>
-          <ImageExpandable src="/architecture.png" alt="System Architecture Diagram" onExpand={setSelectedImg} />
-          <p className="text-sm mt-6" style={{ color: 'var(--color-text-muted)' }}>
-            Built with FastAPI · Qdrant Cloud · Groq · React
-          </p>
         </div>
 
         {/* CTA */}
