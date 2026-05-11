@@ -34,7 +34,6 @@ RUN pip install --user --no-cache-dir --index-url https://download.pytorch.org/w
 # Copy application code
 COPY --chown=user api/ api/
 COPY --chown=user rerank/ rerank/
-COPY --chown=user frontend/ frontend/
 COPY --chown=user index/ index/
 
 # Create data directory
