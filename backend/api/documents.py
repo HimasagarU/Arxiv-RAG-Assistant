@@ -15,6 +15,7 @@ import os
 import time
 import threading
 import sys
+import types
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
@@ -74,6 +75,20 @@ def _job_to_response(job: DocumentJob) -> DocumentJobResponse:
     )
 
 
+def _ensure_backend_imports() -> None:
+    """Make the backend root and ingest package importable at runtime."""
+    backend_root = Path(__file__).resolve().parent.parent
+    backend_root_str = str(backend_root)
+    if backend_root_str not in sys.path:
+        sys.path.insert(0, backend_root_str)
+
+    ingest_dir = backend_root / "ingest"
+    if ingest_dir.is_dir() and "ingest" not in sys.modules:
+        ingest_pkg = types.ModuleType("ingest")
+        ingest_pkg.__path__ = [str(ingest_dir)]
+        sys.modules["ingest"] = ingest_pkg
+
+
 # ---------------------------------------------------------------------------
 # Background ingestion task
 # ---------------------------------------------------------------------------
@@ -87,9 +102,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
     because FastAPI BackgroundTasks don't support async well
     on HuggingFace Spaces.
     """
-    backend_root = str(Path(__file__).resolve().parent.parent)
-    if backend_root not in sys.path:
-        sys.path.insert(0, backend_root)
+    _ensure_backend_imports()
 
     import psycopg
     from psycopg.rows import dict_row
