@@ -252,6 +252,74 @@ allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") i
 if not allowed_origins:
     allowed_origins = ["http://localhost:3000"]
 # Always allow localhost dev and common Vercel deploy patterns
+pass
+
+
+# ---------------------------------------------------------------------------
+# Lifespan
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Load models and indexes on startup."""
+    log.info("Starting ArXiv RAG API...")
+    _state["start_time"] = time.time()
+
+    # Initialize application database (Supabase — users, conversations, jobs)
+    try:
+        from db.app_database import init_app_db, close_app_db
+        await init_app_db()
+        log.info("Application database initialized.")
+    except Exception as e:
+        log.error(f"Failed to initialize app database: {e}")
+        log.warning("Auth, chat history, and document features will be unavailable.")
+
+    def init_retriever():
+        try:
+            import sys
+            sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            from api.fetch_data import fetch_and_extract
+            
+            log.info("Running data bootstrapper...")
+            fetch_and_extract()
+            
+            from api.retrieval import HybridRetriever
+            _state["retriever"] = HybridRetriever()
+            log.info("HybridRetriever initialized successfully.")
+        except Exception as e:
+            log.error(f"Failed to initialize retriever: {e}")
+            log.warning("API will start but /query endpoint will be unavailable.")
+
+    # Start retrieval initialization in background to not block HF Spaces readiness probe
+    threading.Thread(target=init_retriever, daemon=True).start()
+
+    yield
+
+    # Shutdown
+    try:
+        from db.app_database import close_app_db
+        await close_app_db()
+    except Exception:
+        pass
+    log.info("Shutting down ArXiv RAG API...")
+
+
+# ---------------------------------------------------------------------------
+# FastAPI app
+# ---------------------------------------------------------------------------
+
+app = FastAPI(
+    title="ArXiv RAG Assistant",
+    description="Hybrid RAG system for ArXiv papers with Qdrant Cloud dense retrieval, PostgreSQL full-text search, and cross-encoder reranking.",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+allowed_origins = [origin.strip() for origin in allowed_origins_env.split(",") if origin.strip()]
+if not allowed_origins:
+    allowed_origins = ["http://localhost:3000"]
+# Always allow localhost dev and common Vercel deploy patterns
 allowed_origins.extend([
     "http://localhost:5173",  # Vite dev server
     "http://127.0.0.1:5173",
@@ -259,8 +327,7 @@ allowed_origins.extend([
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"]
 )
