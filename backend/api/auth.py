@@ -47,17 +47,33 @@ ACCESS_TOKEN_EXPIRE = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
 
+def _bcrypt_password_bytes(password: str, *, strict: bool) -> bytes:
+    """Encode a password for bcrypt, optionally rejecting inputs over 72 bytes.
+
+    bcrypt only uses the first 72 bytes of input. For new passwords we reject
+    longer inputs so users do not accidentally create a password that is
+    silently truncated. For verification we keep compatibility with existing
+    stored hashes.
+    """
+    pwd_bytes = password.encode("utf-8")
+    if strict and len(pwd_bytes) > 72:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be 72 bytes or fewer after UTF-8 encoding.",
+        )
+    return pwd_bytes[:72]
+
+
 def hash_password(password: str) -> str:
     """Hash a password using bcrypt directly."""
-    # Truncate to 72 bytes (bcrypt limit) to avoid ValueError
-    pwd_bytes = password.encode("utf-8")[:72]
+    pwd_bytes = _bcrypt_password_bytes(password, strict=True)
     salt = bcrypt.gensalt(rounds=12)
     return bcrypt.hashpw(pwd_bytes, salt).decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """Verify a password against its bcrypt hash."""
-    pwd_bytes = plain_password.encode("utf-8")[:72]
+    pwd_bytes = _bcrypt_password_bytes(plain_password, strict=False)
     hashed_bytes = hashed_password.encode("utf-8")
     return bcrypt.checkpw(pwd_bytes, hashed_bytes)
 security_scheme = HTTPBearer(auto_error=False)

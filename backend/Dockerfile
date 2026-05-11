@@ -33,6 +33,8 @@ RUN pip install --user --no-cache-dir --index-url https://download.pytorch.org/w
 
 # Copy application code
 COPY --chown=user api/ api/
+COPY --chown=user ingest/ ingest/
+COPY --chown=user storage/ storage/
 COPY --chown=user rerank/ rerank/
 COPY --chown=user index/ index/
 COPY --chown=user db/ db/

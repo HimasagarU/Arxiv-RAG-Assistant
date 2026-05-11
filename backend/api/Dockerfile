@@ -22,6 +22,8 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 
 # Copy application code
 COPY api/ api/
+COPY ingest/ ingest/
+COPY storage/ storage/
 COPY db/ db/
 COPY rerank/ rerank/
 COPY frontend/ frontend/
