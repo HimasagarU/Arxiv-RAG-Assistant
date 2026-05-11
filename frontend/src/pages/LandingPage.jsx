@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import ThemeToggle from '../components/ThemeToggle';
-import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
+import { PageHeader, PageShell } from '../components/PageShell';
 
 function LandingPage() {
-  const { isDark } = useTheme();
   const { user } = useAuth();
   const [query, setQuery] = useState('');
   const [topK, setTopK] = useState(5);
@@ -27,7 +26,7 @@ function LandingPage() {
   const [chunksCount, setChunksCount] = useState(0);
   const [error, setError] = useState('');
 
-  const API_BASE = import.meta.env.VITE_API_URL || 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space';
+  const API_BASE = (import.meta.env.VITE_API_URL || 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space').replace(/\/$/, '');
 
   useEffect(() => {
     // Health check on mount
@@ -106,32 +105,26 @@ function LandingPage() {
   }
 
   return (
-    <div className="min-h-screen" style={{ background: 'var(--color-bg-primary)', color: 'var(--color-text-primary)' }}>
-      {/* Header */}
-      <header className="border-b border-[var(--color-border)] bg-[var(--color-bg-card)]">
-        <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-4">
-          <div className="flex items-baseline gap-3">
-            <h1 className="font-heading text-2xl font-bold text-[var(--color-accent)]">ArXiv Research Assistant</h1>
-            <span className="text-xs uppercase tracking-wider text-[var(--color-text-muted)]">Hybrid RAG</span>
-          </div>
-
-          <div className="flex items-center gap-4 flex-wrap">
-            {/* Status Badge / Counts */}
+    <PageShell>
+      <PageHeader
+        eyebrow="Hybrid RAG"
+        title="ArXiv Research Assistant"
+        subtitle="Ask questions about transformer circuits, sparse autoencoders, activation patching, and more. Powered by hybrid dense + BM25 retrieval with cross-encoder reranking."
+        actions={(
+          <>
             <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium border ${
-              status === 'connected' 
-                ? 'bg-[var(--color-accent-glow)] text-[var(--color-accent)] border-[var(--color-accent)]' 
+              status === 'connected'
+                ? 'bg-[var(--color-accent-glow)] text-[var(--color-accent)] border-[var(--color-accent)]'
                 : 'bg-[var(--color-bg-hover)] text-[var(--color-text-muted)] border-[var(--color-border)]'
             }`}>
-              <div className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-[var(--color-text-muted)]'}`}></div>
-              {status === 'connected' 
-                ? `${chunksCount.toLocaleString()} chunks · ${papersCount.toLocaleString()} papers` 
+              <div className={`w-2 h-2 rounded-full ${status === 'connected' ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-[var(--color-text-muted)]'}`} />
+              {status === 'connected'
+                ? `${chunksCount.toLocaleString()} chunks · ${papersCount.toLocaleString()} papers`
                 : status === 'offline' ? 'API Offline' : 'Connecting…'}
             </div>
 
-            {/* Theme Toggle */}
             <ThemeToggle />
 
-            {/* Auth Buttons */}
             <div className="flex items-center gap-2">
               {user ? (
                 <Link to="/dashboard" className="btn-primary">
@@ -148,12 +141,11 @@ function LandingPage() {
                 </>
               )}
             </div>
-          </div>
-        </div>
-      </header>
+          </>
+        )}
+      />
 
-      {/* Main Content */}
-      <main className="max-w-4xl mx-auto px-4 py-12">
+      <main className="mx-auto max-w-4xl px-4 sm:px-6 py-12">
         {/* Hero */}
         <section className="text-center mb-10">
           <h2 className="font-heading text-4xl font-bold mb-3 text-[var(--color-text-primary)]">Mechanistic Interpretability Research</h2>
@@ -342,7 +334,7 @@ function LandingPage() {
         <a href="https://groq.com" target="_blank" rel="noopener noreferrer" className="text-[var(--color-accent)] hover:underline mx-1">Groq</a> &amp;
         <a href="https://arxiv.org" target="_blank" rel="noopener noreferrer" className="text-[var(--color-accent)] hover:underline mx-1">ArXiv API</a>
       </footer>
-    </div>
+    </PageShell>
   );
 }
 
