@@ -40,7 +40,7 @@ flowchart TD
     end
 
     %% Frontend
-    subgraph Frontend [Web UI]
+    subgraph Frontend [React Web UI]
         M((User Query)) --> N{FastAPI Server}
         N --> G
         L -. SSE Stream .-> N
