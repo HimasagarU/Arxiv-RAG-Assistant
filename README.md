@@ -69,6 +69,66 @@ The system begins offline by building a curated, structured corpus. **PostgreSQL
 - **Dense Vectors**: Chunks are embedded using `BAAI/bge-large-en-v1.5` and pushed to **Qdrant Cloud**.
 - **Lexical/Metadata Artifacts**: `rank_bm25` indexes and JSON metadata files are generated and packaged as `.pkl`/`.jsonl` artifacts for fast in-memory loading in production.
 
+#### 2.4. Database Schema (Neon / Supabase)
+The system uses a PostgreSQL database schema that is compatible with both **Neon** and **Supabase**. It manages the papers, chunks, and citation graph.
+
+```mermaid
+erDiagram
+    papers {
+        TEXT paper_id PK
+        TEXT title
+        TEXT abstract
+        TEXT authors
+        TEXT categories
+        TEXT pdf_url
+        TIMESTAMPTZ published
+        TIMESTAMPTZ updated
+        TEXT full_text
+        TEXT download_status
+        TEXT parse_status
+        TEXT local_pdf_path
+        REAL quality_score
+        BOOLEAN is_seed
+        TEXT layer
+        TEXT source
+        TEXT semantic_scholar_id
+        TIMESTAMPTZ created_at
+    }
+
+    chunks {
+        TEXT chunk_id PK
+        TEXT paper_id FK
+        TEXT chunk_type
+        TEXT modality
+        TEXT title
+        TEXT authors
+        TEXT categories
+        TEXT chunk_text
+        TEXT section_hint
+        INTEGER page_start
+        INTEGER page_end
+        INTEGER token_count
+        INTEGER chunk_index
+        INTEGER total_chunks
+        TEXT chunk_source
+        TEXT layer
+        JSONB artifact_meta
+        TSVECTOR search_tsv
+        TIMESTAMPTZ created_at
+    }
+
+    citation_edges {
+        TEXT source_paper_id FK
+        TEXT target_paper_id FK
+        TEXT direction
+        TIMESTAMPTZ created_at
+    }
+
+    papers ||--o{ chunks : "has"
+    papers ||--o{ citation_edges : "references (as source)"
+    papers ||--o{ citation_edges : "referenced by (as target)"
+```
+
 ### 3. Live API & AI Engine
 
 The live API is built with **FastAPI** and is optimized for low-latency, stateless deployment (e.g., Hugging Face Spaces or Render). It serves real-time answers using a hybrid retrieval and reranking loop.
