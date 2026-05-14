@@ -111,7 +111,7 @@ class Reranker:
             else:
                 pairs.append([query, p.get("retrieval_text", p.get(text_key, ""))])
 
-        scores = self.ranker.predict(pairs, batch_size=self.batch_size)
+        scores = self.ranker.predict(pairs, batch_size=self.batch_size, activation_fct=None)
 
         # Map scores back to the rerank pool
         for i, p in enumerate(rerank_pool):
