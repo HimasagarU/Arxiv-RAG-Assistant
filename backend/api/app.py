@@ -495,7 +495,7 @@ class SourceInfo(BaseModel):
     section_hint: str = "other"
     layer: str = "core"
     rerank_score: float = 0.0
-    relevance_score: float = 0.0
+    chunk_label: str = "general context"
 
 
 class AnalyticsInfo(BaseModel):
@@ -695,18 +695,37 @@ if _frontend_dir.is_dir():
 # ---------------------------------------------------------------------------
 
 def _build_sources_block(passages: list[dict]) -> str:
-    """Build numbered source list for the model to reference."""
-    lines = []
+    """Build grouped source list for the model to reference."""
+    from collections import defaultdict
+    by_paper = defaultdict(list)
     for i, p in enumerate(passages, 1):
-        title = p.get('title', 'Untitled')
-        lines.append(f'[{i}] "{title}"')
-    return "\n".join(lines)
+        p["_ref_id"] = i
+        by_paper[p.get("paper_id", "unknown")].append(p)
+    
+    blocks = []
+    for paper_id, chunks in by_paper.items():
+        title = chunks[0].get('title', 'Untitled')
+        authors = chunks[0].get('authors', 'Unknown')
+        ref_ids = [str(c["_ref_id"]) for c in chunks]
+        blocks.append(f'Paper: "{title}" (Authors: {authors})\nCitations: [{", ".join(ref_ids)}]')
+    
+    return "\n\n".join(blocks)
 
 
 def build_prompt(query: str, compressed_context: str, passages: list[dict],
                  intent: str = "discovery") -> str:
     """Build a RAG prompt with intent-specific answer templates."""
     sources_block = _build_sources_block(passages)
+    
+    # Detect multiple papers to warn against over-synthesis
+    unique_papers = {p.get("paper_id") for p in passages if p.get("paper_id")}
+    if len(unique_papers) > 1:
+        synthesis_warning = (
+            "\n\nNOTE: The retrieved context contains evidence from multiple distinct papers. "
+            "Do NOT merge their theories into one framework. Preserving the distinction between "
+            "their respective interpretations is critical."
+        )
+        compressed_context += synthesis_warning
 
     if intent == "explanatory":
         return _build_explanatory_prompt(query, compressed_context, sources_block)
@@ -722,29 +741,28 @@ def _build_explanatory_prompt(query: str, context: str, sources: str) -> str:
     return f"""You are an expert AI/ML research assistant. A student has asked an explanatory question.
 Your job is to give a clear, accurate, mechanism-level explanation grounded in the source passages.
 
-CRITICAL RULES:
-1. Every key claim must be supported by at least one source. Use citations [1], [2], etc.
-2. Only make claims explicitly supported by the retrieved passages.
-3. Distinguish clearly between established findings, hypotheses, and your own synthesis.
-4. If the sources lack evidence for a key part of the explanation, explicitly state your uncertainty.
-5. Do NOT write a literature review. Write a direct explanation of the mechanism/concept.
-6. Use the Feynman Technique: be clear, but do NOT omit important technical details.
-7. Avoid blending unrelated retrieved concepts into one narrative.
+CRITICAL RULES FOR FAITHFULNESS & ATTRIBUTION:
+1. Every major mechanistic/scientific claim MUST be explicitly attributed to a specific paper using citations [1], [2], etc.
+2. DO NOT merge distinct papers into a unified mechanism unless the evidence explicitly establishes that connection.
+3. If papers discuss related but distinct ideas, explicitly separate them (e.g., "Paper A proposes X, while Paper B describes an adjacent perspective Y").
+4. Distinguish clearly between empirical findings (experiments/results) and theoretical interpretations.
+5. Use calibrated scientific language: prefer "suggests", "proposes", "argues", or "interprets" instead of "proves" or "establishes" unless the evidence is absolute.
+6. If the sources lack evidence for a key part of the explanation, explicitly state your uncertainty.
+7. Avoid generic phrases like "Researchers found..."; use specific attributions to the provided sources.
 
 STRUCTURE YOUR ANSWER EXACTLY LIKE THIS:
-1. **Definition**: A clear 1-2 sentence definition of the concept. Start with double asterisks **like this**.
-2. **How It Works**: A step-by-step explanation of the mechanism or pipeline. Number each step.
-3. **Why It Works**: Explain the intuition behind why this approach is effective.
-4. **Limitations**: Briefly note known limitations or failure modes based on evidence.
-5. **Evidence Gaps / Inference**: Explicitly call out anything that is weak or partially supported by the retrieved passages.
-6. **References**: List the numbered source titles.
+1. **Definition**: A clear 1-2 sentence definition. Start with double asterisks **like this**.
+2. **Mechanisms**: Explain the concepts found in the papers. Explicitly separate different theoretical framings.
+3. **Evidence Basis**: List the strongest empirical findings supporting these mechanisms.
+4. **Limitations & Uncertainties**: Briefly note failure modes or evidence gaps.
+5. **References**: List the grouped source titles.
 
 ---
 
 SOURCE PASSAGES:
 {context}
 
-AVAILABLE SOURCES:
+AVAILABLE SOURCES (Grouped by Paper):
 {sources}
 
 QUESTION: {query}
@@ -756,27 +774,27 @@ def _build_comparative_prompt(query: str, context: str, sources: str) -> str:
     return f"""You are an expert AI/ML research assistant. A student wants to compare two or more approaches.
 Your job is to give a balanced, evidence-based comparison grounded strictly in the source passages.
 
-CRITICAL RULES:
+CRITICAL RULES FOR FAITHFULNESS & ATTRIBUTION:
 1. Every claim must be supported by at least one source. Use citations [1], [2], etc.
-2. Be fair and balanced ” present strengths and weaknesses of each side based purely on evidence.
-3. Do NOT fabricate benchmark numbers. Only cite numbers found in the sources.
-4. Distinguish between empirical facts, author hypotheses, and speculation.
-5. Explicitly state uncertainty when comparative evidence is weak.
+2. Attribute findings explicitly to papers (e.g., "Paper A proposes X, while Paper B argues for Y").
+3. DO NOT merge distinct papers into a unified framework unless the evidence explicitly establishes that connection.
+4. If papers represent alternative or adjacent interpretations, describe them separately instead of synthesizing them.
+5. Use calibrated scientific language: "suggests", "proposes", "argues", "interprets".
+6. Explicitly state uncertainty when comparative evidence is weak or contradictory.
 
 STRUCTURE YOUR ANSWER EXACTLY LIKE THIS:
 1. **Overview**: A 1-2 sentence summary of what is being compared. Start with double asterisks **like this**.
-2. **Approach A**: Summary of the first approach ” key mechanism, strengths.
-3. **Approach B**: Summary of the second approach ” key mechanism, strengths.
-4. **Key Differences**: A clear comparison of the main differences (use a list).
-5. **When to Use Each**: Practical guidance on when each approach is more appropriate.
-6. **References**: List the numbered source titles.
+2. **Analysis by Approach**: Group insights by paper/framework. Do NOT blend them into a single list.
+3. **Key Differences & Trade-offs**: Explicitly compare the approaches. Use "related but distinct" or "alternative interpretation" if appropriate.
+4. **Summary of Evidence**: Which approach has stronger empirical support?
+5. **References**: List the grouped source titles.
 
 ---
 
 SOURCE PASSAGES:
 {context}
 
-AVAILABLE SOURCES:
+AVAILABLE SOURCES (Grouped by Paper):
 {sources}
 
 QUESTION: {query}
@@ -788,26 +806,27 @@ def _build_evidence_prompt(query: str, context: str, sources: str) -> str:
     return f"""You are an expert AI/ML research assistant focusing on mechanistic interpretability and scientific rigor.
 Your job is to provide an evidence-grounded answer based strictly on the provided passages.
 
-CRITICAL RULES:
+CRITICAL RULES FOR FAITHFULNESS & ATTRIBUTION:
 1. Only make claims supported by retrieved passages. Provide exact numbered citations [1], [2].
 2. Attribute findings to papers explicitly whenever possible (e.g., "Olsson et al. observed..."). Avoid generic "Researchers found...".
-3. Explicitly state uncertainty when evidence is weak or absent.
-4. Clearly distinguish between established findings, hypotheses, interpretations, and speculation.
-5. Avoid blending unrelated retrieved concepts into one narrative. Treat each piece of evidence rigorously.
+3. DO NOT merge distinct experiments or theories into a unified narrative unless the authors explicitly do so.
+4. Use calibrated scientific language: "suggests", "proposes", "argues", "interprets". Avoid "proves" or "establishes".
+5. Distinguish clearly between experimentally demonstrated findings (empirical) vs. interpretations/theoretical claims.
+6. If retrieved papers represent alternative or adjacent interpretations, describe them separately.
 
 STRUCTURE YOUR ANSWER EXACTLY LIKE THIS:
-1. **Core Finding**: A bold 1-2 sentence statement summarizing the strongest evidence answering the question. Start with double asterisks **like this**.
-2. **Empirical Evidence**: List the specific experiments, ablations, or results that support the core finding. Provide explicit attribution.
-3. **Interpretations & Hypotheses**: Describe the authors' interpretations of these results.
-4. **Uncertainty & Gaps**: State clearly what the evidence does *not* show or where it is weak.
-5. **References**: List the numbered source titles.
+1. **Core Finding**: A bold 1-2 sentence statement summarizing the strongest evidence. Start with double asterisks **like this**.
+2. **Empirical Evidence (By Paper)**: List findings grouped by their original papers. Do not blend evidence from different sources.
+3. **Theoretical Interpretations**: Describe the authors' interpretations of these results.
+4. **Consistency & Gaps**: State clearly if the evidence is contradictory or if there are gaps in the findings.
+5. **References**: List the grouped source titles.
 
 ---
 
 SOURCE PASSAGES:
 {context}
 
-AVAILABLE SOURCES:
+AVAILABLE SOURCES (Grouped by Paper):
 {sources}
 
 QUESTION: {query}
@@ -819,28 +838,28 @@ def _build_general_prompt(query: str, context: str, sources: str) -> str:
     return f"""You are an expert AI/ML research assistant. Your goal is to give a thorough,
 well-structured answer that a smart graduate student would find genuinely useful.
 
-CRITICAL RULES:
+CRITICAL RULES FOR FAITHFULNESS & ATTRIBUTION:
 1. Read ALL provided source passages carefully before answering.
 2. Use numbered citations [1], [2] to reference sources. NEVER mention chunk IDs.
-3. Only make claims supported by the retrieved passages.
-4. Distinguish clearly between established findings, hypotheses, and what you infer from them.
-5. If information is insufficient or evidence is weak, say so honestly rather than speculating.
-6. Attribute findings explicitly to papers or authors whenever possible.
-7. Avoid blending unrelated retrieved concepts into one narrative.
+3. Attribute findings explicitly to papers or authors whenever possible.
+4. DO NOT merge distinct papers into a unified theory unless the evidence explicitly establishes that connection.
+5. If papers share terminology but discuss different mechanisms, use language like "related but distinct" or "alternative interpretation".
+6. Use calibrated scientific language: "suggests", "proposes", "argues", "interprets".
+7. Distinguish clearly between empirical findings and theoretical interpretations.
 
 STRUCTURE YOUR ANSWER LIKE THIS:
-1. **Summary**: A bold 1-2 sentence executive summary answering the core question. Start with double asterisks **like this**.
-2. **Key Findings**: The most important technical insights from the sources with explicit attribution.
-3. **Mechanism / Evidence**: Explain the main mechanism or reasoning and cite the strongest evidence.
-4. **Implications / Limitations**: What follows from the evidence, and what remains uncertain.
-5. **References**: Numbered source titles.
+1. **Summary**: A bold 1-2 sentence executive summary. Start with double asterisks **like this**.
+2. **Insights by Paper**: The most important technical insights grouped by their source papers.
+3. **Comparison & Synthesis**: How do these insights relate? Explicitly separate adjacent but distinct perspectives.
+4. **Uncertainties & Implications**: What remains uncertain or contradictory across the sources.
+5. **References**: List the grouped source titles.
 
 ---
 
 SOURCE PASSAGES:
 {context}
 
-AVAILABLE SOURCES:
+AVAILABLE SOURCES (Grouped by Paper):
 {sources}
 
 QUESTION: {query}
@@ -1316,7 +1335,7 @@ async def query_endpoint(
             categories=p.get("categories", ""),
             chunk_text=p["chunk_text"],
             rerank_score=p.get("rerank_score", 0.0),
-            relevance_score=p.get("relevance_score", 0.0),
+            chunk_label=p.get("chunk_label", "general context"),
         )
         for p in passages
     ]
@@ -1404,7 +1423,7 @@ async def query_stream_endpoint(request: QueryRequest):
             "categories": p.get("categories", ""),
             "chunk_text": p["chunk_text"],
             "rerank_score": p.get("rerank_score", 0.0),
-            "relevance_score": p.get("relevance_score", 0.0),
+            "chunk_label": p.get("chunk_label", "general context"),
         }
         for p in passages
     ]

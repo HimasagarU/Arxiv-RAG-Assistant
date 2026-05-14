@@ -1397,7 +1397,18 @@ class HybridRetriever:
 
     # ------------------------------------------------------------------
     # Main retrieval pipeline
-    # ------------------------------------------------------------------
+    def _get_heuristic_label(self, section: str) -> str:
+        """Categorize chunks based on section names."""
+        s = section.lower()
+        if any(kw in s for kw in ("result", "experiment", "evaluation", "benchmark", "ablation", "finding", "performance")):
+            return "empirical evidence"
+        if any(kw in s for kw in ("introduction", "related work", "background", "motivation", "problem")):
+            return "theoretical background"
+        if any(kw in s for kw in ("method", "approach", "architecture", "framework", "algorithm")):
+            return "methodology"
+        if any(kw in s for kw in ("discussion", "limitation", "future work", "conclusion", "interpretation")):
+            return "theoretical interpretation"
+        return "general context"
 
     def retrieve(
         self,
@@ -1612,22 +1623,11 @@ class HybridRetriever:
             if is_explanatory:
                 reranked = self._ensure_layer_coverage(reranked, merged)
 
-            # Calculate robust relevance_score (Sigmoid confidence)
-            if reranked:
-                # 1. Sigmoid transformation for probability-like scaling
-                # BGE-Reranker-v2-m3 scores around 1.0 are good, 5.0+ are very strong
-                # We use a slight shift to make 0.0 (logit) look like ~70%
-                for p in reranked:
-                    logit = float(p.get("rerank_score", 0.0))
-                    # Confidence probability (0 to 1)
-                    p["relevance_score"] = 1.0 / (1.0 + np.exp(-(logit + 1.5) / 2.0))
-                
-                # 2. Final relative normalization so top is always strong
-                max_rel = max(p["relevance_score"] for p in reranked)
-                if max_rel > 0:
-                    for p in reranked:
-                        p["relevance_score"] = min(1.0, p["relevance_score"] / max_rel)
-
+            # Apply strict reranker threshold for scientific/grounding-heavy intents
+            if intent in (INTENT_TECHNICAL, INTENT_EXPLANATORY, INTENT_EVIDENCE, INTENT_SOTA):
+                # Discard chunks with rerank_score < 0.75
+                reranked = [p for p in reranked if p.get("rerank_score", 0.0) >= 0.75]
+            
             analytics = self.extract_analytics(merged)
 
             passages = []
@@ -1647,7 +1647,7 @@ class HybridRetriever:
                     "layer": meta.get("layer", "core"),
                     "rerank_score": p.get("rerank_score", 0.0),
                     "fusion_score": p.get("fusion_score", 0.0),
-                    "relevance_score": p.get("relevance_score", 0.0),
+                    "chunk_label": self._get_heuristic_label(meta.get("section_hint", "other")),
                     "sources": p.get("sources", []),
                 })
 
