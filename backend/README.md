@@ -1,3 +1,13 @@
+---
+title: ArXiv RAG Assistant
+emoji: 🔍
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_file: api/app.py
+pinned: false
+---
+
 # Backend — ArXiv RAG Assistant
 
 FastAPI service: hybrid **Qdrant dense** + **BM25 lexical** retrieval, cross-encoder rerank, Gemini/Groq generation, JWT auth, Redis caching, and optional document ingest.
