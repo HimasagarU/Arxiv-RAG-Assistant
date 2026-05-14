@@ -232,6 +232,7 @@ export async function streamPublicQuery(query, {
   author = null,
   onToken = () => {},
   onMetadata = () => {},
+  onStatus = () => {},
   onError = () => {},
   onDone = () => {},
 } = {}) {
@@ -264,6 +265,8 @@ export async function streamPublicQuery(query, {
       } else if (type === 'token') {
         receivedFirstToken = true;
         onToken(payload.content || '');
+      } else if (type === 'status') {
+        onStatus(payload.stage || '');
       } else if (type === 'error') {
         errorOccurred = true;
         onError(payload.message || 'Stream error');
@@ -333,6 +336,7 @@ export async function streamConversationQuery(conversationId, query, {
   onToken = () => {},
   onRetrievalStart = () => {},
   onRetrievalDone = () => {},
+  onStatus = () => {},
   onError = () => {},
   onDone = () => {},
 } = {}) {
@@ -384,6 +388,8 @@ export async function streamConversationQuery(conversationId, query, {
       } else if (type === 'token') {
         receivedFirstToken = true;
         onToken(payload.content || '');
+      } else if (type === 'status') {
+        onStatus(payload.stage || '');
       } else if (type === 'error') {
         errorOccurred = true;
         onError(payload.message || 'Stream error');

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ArXiv Research Assistant — Mechanistic Interpretability</title>
-    <meta name="description" content="AI-powered research assistant for mechanistic interpretability papers. Hybrid RAG retrieval with Qdrant dense search, in-memory BM25, and BGE-Reranker-v2-m3.">
+    <meta name="description" content="AI-powered research assistant for mechanistic interpretability papers. Hybrid RAG retrieval with Qdrant dense search, in-memory BM25, and BGE-Reranker-Base.">
     <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         /* ============================================ */
@@ -752,7 +752,7 @@
             <!-- Hero -->
             <section class="hero">
                 <h1>Mechanistic Interpretability Research</h1>
-                <p>Ask questions about transformer circuits, sparse autoencoders, activation patching, and more. Powered by hybrid dense + BM25 retrieval with BGE-Reranker-v2-m3.</p>
+                <p>Ask questions about transformer circuits, sparse autoencoders, activation patching, and more. Powered by hybrid dense + BM25 retrieval with BGE-Reranker-Base.</p>
             </section>
 
             <!-- Search -->
@@ -786,7 +786,7 @@
                         </div>
                         <div class="filter-group">
                             <label>Author:</label>
-                            <input type="text" id="filterAuthor" placeholder="e.g. Hinton" />
+                            <input type="text" id="filterAuthor" placeholder="e.g. Elhage" />
                         </div>
                     </div>
                 </div>
@@ -798,590 +798,224 @@
                 <div class="sample-query" onclick="useSample(this)">How does activation patching work?</div>
                 <div class="sample-query" onclick="useSample(this)">Explain sparse autoencoders for interpretability</div>
                 <div class="sample-query" onclick="useSample(this)">What is superposition in neural networks?</div>
-                <div class="sample-query" onclick="useSample(this)">Circuit discovery vs probing classifiers</div>
-                <div class="sample-query" onclick="useSample(this)">Latest advances in mechanistic interpretability</div>
             </section>
 
-            <!-- Error -->
-            <div class="error-card" id="errorCard"></div>
-
-            <!-- Loading -->
+            <!-- Loading Overlay -->
             <div class="loading-overlay" id="loadingOverlay">
                 <div class="loading-spinner"></div>
-                <div class="loading-text">Searching mechanistic interpretability papers…</div>
+                <div class="loading-text">Analyzing research corpus…</div>
                 <div class="loading-steps">
-                    <div class="loading-step active" id="stepDense">⟳ Dense retrieval (semantic search)</div>
-                    <div class="loading-step" id="stepBM25">○ BM25 retrieval (lexical match)</div>
-                    <div class="loading-step" id="stepRerank">○ Cross-encoder reranking</div>
-                    <div class="loading-step" id="stepGenerate">○ Generating answer</div>
+                    <div class="loading-step" id="step-expand"><div class="status-dot"></div>Expanding query…</div>
+                    <div class="loading-step" id="step-retrieve"><div class="status-dot"></div>Hybrid retrieval…</div>
+                    <div class="loading-step" id="step-rerank"><div class="status-dot"></div>BGE-Reranker-Base…</div>
+                    <div class="loading-step" id="step-generate"><div class="status-dot"></div>Synthesizing answer…</div>
                 </div>
             </div>
 
+            <!-- Error Card -->
+            <div class="error-card" id="errorCard"></div>
+
             <!-- Results -->
-            <section class="results-section" id="resultsSection">
-                <!-- Analytics -->
-                <div class="analytics-strip" id="analyticsStrip"></div>
-
-                <!-- Latency -->
+            <div class="results-section" id="resultsSection">
                 <div class="latency-bar" id="latencyBar"></div>
-
-                <!-- Answer -->
+                
                 <div class="answer-card">
                     <div class="answer-label">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-                        Research Answer
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                        Synthesized Answer
                     </div>
                     <div class="answer-text" id="answerText"></div>
                 </div>
 
-                <!-- References (extracted from answer) -->
                 <div class="references-card" id="referencesCard">
-                    <div class="references-label">📚 References</div>
+                    <div class="references-label">Citations</div>
                     <ul class="references-list" id="referencesList"></ul>
                 </div>
 
-                <!-- Sources -->
-                <div class="sources-header" id="sourcesCount">Sources</div>
+                <div class="sources-header">Supporting Evidence</div>
                 <div id="sourcesList"></div>
-            </section>
+            </div>
         </main>
 
         <!-- Footer -->
         <footer class="footer">
             ArXiv Research Assistant · Hybrid Dense + BM25 + Cross-Encoder Reranking ·
-            <a href="https://ai.google.dev/gemini-api" target="_blank">Gemini</a> &amp;
+            Public queries powered by <a href="https://groq.com" target="_blank">Groq</a> ·
             <a href="https://arxiv.org" target="_blank">ArXiv API</a>
         </footer>
     </div>
 
+    <!-- Scripts -->
     <script>
-        // ============================================
-        // Config
-        // ============================================
-        const API_BASE = localStorage.getItem('VITE_API_URL') || 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space';
-        let currentAbortController = null;
-
-        // ============================================
-        // DOM Refs
-        // ============================================
-        const queryInput = document.getElementById('queryInput');
-        const searchBtn = document.getElementById('searchBtn');
-        const topKSelect = document.getElementById('topK');
-        const filterYear = document.getElementById('filterYear');
-        const filterAuthor = document.getElementById('filterAuthor');
-        const loadingOverlay = document.getElementById('loadingOverlay');
-        const resultsSection = document.getElementById('resultsSection');
-        const errorCard = document.getElementById('errorCard');
-        const answerText = document.getElementById('answerText');
-        const sourcesList = document.getElementById('sourcesList');
-        const sourcesCount = document.getElementById('sourcesCount');
-        const latencyBar = document.getElementById('latencyBar');
-        const analyticsStrip = document.getElementById('analyticsStrip');
-        const statusBadge = document.getElementById('statusBadge');
-        const statusText = document.getElementById('statusText');
-        const sampleQueries = document.getElementById('sampleQueries');
-        const referencesCard = document.getElementById('referencesCard');
-        const referencesList = document.getElementById('referencesList');
-
-        // ============================================
-        // Health Check
-        // ============================================
-        async function checkHealth() {
-            try {
-                const resp = await fetch(`${API_BASE}/health`);
-                const data = await resp.json();
-                const collections = data.collections || {};
-                const textCount = collections['arxiv_text'] || 0;
-                statusText.textContent = `${textCount.toLocaleString()} chunks · ${data.db_papers.toLocaleString()} papers`;
-                statusBadge.style.borderColor = 'rgba(45, 106, 79, 0.2)';
-            } catch (e) {
-                statusText.textContent = 'API Offline';
-                statusBadge.style.background = 'rgba(166, 61, 64, 0.08)';
-                statusBadge.style.color = '#a63d40';
-                statusBadge.style.borderColor = 'rgba(166, 61, 64, 0.2)';
-                document.querySelector('.status-dot').style.background = '#a63d40';
-            }
-        }
-        checkHealth();
-
-        // ============================================
-        // Submit Query (uses streaming endpoint)
-        // ============================================
-        queryInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                submitQuery();
-            }
-        });
+        const API_BASE = (window.location.origin.includes('localhost') ? 'http://localhost:8000' : window.location.origin).replace(/\/$/, '');
+        
+        let eventSource = null;
 
         async function submitQuery() {
-            const query = queryInput.value.trim();
+            const query = document.getElementById('queryInput').value.trim();
             if (!query) return;
 
-            // Abort any previous stream
-            if (currentAbortController) {
-                currentAbortController.abort();
-            }
-            currentAbortController = new AbortController();
+            // Reset UI
+            document.getElementById('searchBtn').disabled = true;
+            document.getElementById('loadingOverlay').classList.add('visible');
+            document.getElementById('resultsSection').classList.remove('visible');
+            document.getElementById('errorCard').classList.remove('visible');
+            document.getElementById('answerText').innerText = '';
+            document.getElementById('answerText').classList.add('streaming');
+            document.getElementById('sourcesList').innerHTML = '';
+            document.getElementById('referencesList').innerHTML = '';
+            document.getElementById('referencesCard').classList.remove('visible');
+            document.getElementById('latencyBar').innerHTML = '';
 
-            const topK = parseInt(topKSelect.value);
-            const category = null;
-            const startYear = filterYear.value ? parseInt(filterYear.value) : null;
-            const author = filterAuthor.value.trim() || null;
-
-            // UI State: Loading
-            searchBtn.disabled = true;
-            errorCard.classList.remove('visible');
-            resultsSection.classList.remove('visible');
-            referencesCard.classList.remove('visible');
-            loadingOverlay.classList.add('visible');
-            sampleQueries.style.display = 'none';
-            answerText.textContent = '';
-            answerText.classList.remove('streaming');
-            sourcesList.innerHTML = '';
-            referencesList.innerHTML = '';
-            latencyBar.innerHTML = '';
-            analyticsStrip.innerHTML = '';
-
-            animateLoadingSteps();
+            // Reset steps
+            const steps = ['expand', 'retrieve', 'rerank', 'generate'];
+            steps.forEach(s => {
+                const el = document.getElementById(`step-${s}`);
+                el.classList.remove('active', 'done');
+            });
 
             try {
-                const body = { query, top_k: topK };
-                if (category) body.category = category;
-                if (startYear) body.start_year = startYear;
-                if (author) body.author = author;
+                const topK = document.getElementById('topK').value;
+                const startYear = document.getElementById('filterYear').value;
+                const author = document.getElementById('filterAuthor').value;
 
-                // Try streaming endpoint first
-                const resp = await fetch(`${API_BASE}/query/stream`, {
+                const response = await fetch(`${API_BASE}/query/stream`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body),
-                    signal: currentAbortController.signal,
+                    body: JSON.stringify({
+                        query,
+                        top_k: parseInt(topK),
+                        start_year: startYear ? parseInt(startYear) : null,
+                        author: author || null
+                    })
                 });
 
-                if (!resp.ok) {
-                    // Fallback to non-streaming
-                    const fallbackResp = await fetch(`${API_BASE}/query`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify(body),
-                    });
-                    if (!fallbackResp.ok) {
-                        const errData = await fallbackResp.json().catch(() => ({}));
-                        throw new Error(errData.detail || `HTTP ${fallbackResp.status}`);
-                    }
-                    const data = await fallbackResp.json();
-                    loadingOverlay.classList.remove('visible');
-                    renderResults(data);
-                    return;
-                }
+                if (!response.ok) throw new Error('Query failed');
 
-                // Process SSE stream
-                loadingOverlay.classList.remove('visible');
-                resultsSection.classList.add('visible');
-                answerText.classList.add('streaming');
-
-                const reader = resp.body.getReader();
+                const reader = response.body.getReader();
                 const decoder = new TextDecoder();
                 let buffer = '';
-                let fullAnswer = '';
-                let metadataReceived = false;
 
                 while (true) {
-                    const { value, done } = await reader.read();
+                    const { done, value } = await reader.read();
                     if (done) break;
 
                     buffer += decoder.decode(value, { stream: true });
-
-                    // Process SSE events from buffer
                     const lines = buffer.split('\n');
-                    buffer = lines.pop(); // keep incomplete line in buffer
+                    buffer = lines.pop();
 
                     for (const line of lines) {
                         if (!line.startsWith('data: ')) continue;
-                        const jsonStr = line.slice(6).trim();
-                        if (!jsonStr) continue;
+                        const data = JSON.parse(line.slice(6));
 
-                        try {
-                            const event = JSON.parse(jsonStr);
-
-                            if (event.type === 'metadata') {
-                                metadataReceived = true;
-                                renderStreamMetadata(event);
-                            } else if (event.type === 'token') {
-                                fullAnswer += event.content;
-                                answerText.textContent = fullAnswer;
-                                // Auto-scroll answer into view
-                                answerText.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-                            } else if (event.type === 'error') {
-                                throw new Error(event.message);
-                            } else if (event.type === 'done') {
-                                answerText.classList.remove('streaming');
-                                // Update total latency
-                                updateTotalLatency(event.total_ms);
-                                // Parse and render references from the full answer
-                                processAnswerReferences(fullAnswer);
-                            }
-                        } catch (parseErr) {
-                            if (parseErr.message && !parseErr.message.includes('JSON')) {
-                                throw parseErr;
-                            }
+                        if (data.type === 'status') {
+                            handleStatusUpdate(data.stage);
+                        } else if (data.type === 'metadata') {
+                            handleMetadata(data);
+                        } else if (data.type === 'token') {
+                            handleToken(data.content);
+                        } else if (data.type === 'error') {
+                            handleError(data.message);
+                        } else if (data.type === 'done') {
+                            handleDone(data);
                         }
                     }
                 }
-
-                // Ensure streaming cursor is removed
-                answerText.classList.remove('streaming');
-                if (fullAnswer) {
-                    processAnswerReferences(fullAnswer);
-                }
-
             } catch (err) {
-                if (err.name === 'AbortError') return;
-                loadingOverlay.classList.remove('visible');
-                answerText.classList.remove('streaming');
-                errorCard.textContent = `⚠ Error: ${err.message}. Make sure the API server is running.`;
-                errorCard.classList.add('visible');
+                handleError(err.message);
             } finally {
-                searchBtn.disabled = false;
+                document.getElementById('searchBtn').disabled = false;
+                document.getElementById('loadingOverlay').classList.remove('visible');
             }
         }
 
-        // ============================================
-        // Process answer: extract References section
-        // ============================================
-        function processAnswerReferences(fullAnswer) {
-            // Find "References:" section at the end of the answer
-            const refRegex = /\n\s*References:\s*\n([\s\S]*?)$/i;
-            const match = fullAnswer.match(refRegex);
+        function handleStatusUpdate(stage) {
+            const mapping = {
+                'Expanding query': 'expand',
+                'Hybrid retrieval': 'retrieve',
+                'Reranking (Cross-Encoder)': 'rerank',
+                'Synthesizing Answer': 'generate'
+            };
+            const stepId = mapping[stage];
+            if (!stepId) return;
 
-            if (match) {
-                // Strip references from displayed answer
-                const cleanAnswer = fullAnswer.slice(0, match.index).trim();
-                renderFormattedAnswer(cleanAnswer);
+            const steps = ['expand', 'retrieve', 'rerank', 'generate'];
+            const currentIdx = steps.indexOf(stepId);
 
-                // Parse individual references
-                const refLines = match[1].trim().split('\n').filter(l => l.trim());
-                if (refLines.length > 0) {
-                    referencesList.innerHTML = refLines.map(line => {
-                        const refMatch = line.match(/^\[(\d+)\]\s*(.+)/);
-                        if (refMatch) {
-                            const num = refMatch[1];
-                            const title = refMatch[2].replace(/^[""]|[""]$/g, '').trim();
-                            return `<li><span class="ref-num">[${escapeHtml(num)}]</span><span>${escapeHtml(title)}</span></li>`;
-                        }
-                        return `<li><span>${escapeHtml(line.trim())}</span></li>`;
-                    }).join('');
-                    referencesCard.classList.add('visible');
-                }
-            } else {
-                renderFormattedAnswer(fullAnswer.trim());
-            }
-        }
-
-        // ============================================
-        // Render formatted answer (basic markdown)
-        // ============================================
-        function renderFormattedAnswer(text) {
-            if (!text) return;
-
-            let html = escapeHtml(text);
-
-            // Bold: **text** (including multi-line)
-            html = html.replace(/\*\*([\s\S]+?)\*\*/g, '<strong>$1</strong>');
-            
-            // Italic: _text_ or *text*
-            html = html.replace(/_([\s\S]+?)_/g, '<em>$1</em>');
-            
-            // Lists: lines starting with •, -, or *
-            const lines = html.split('\n');
-            let inList = false;
-            let formattedLines = [];
-
-            for (let line of lines) {
-                const listMatch = line.match(/^\s*[•\-*]\s+(.+)/);
-                const numMatch = line.match(/^\s*(\d+\.)\s+(.+)/);
-                
-                if (listMatch) {
-                    if (!inList) {
-                        formattedLines.push('<ul style="margin-bottom: 10px; padding-left: 20px;">');
-                        inList = true;
-                    }
-                    formattedLines.push(`<li>${listMatch[1]}</li>`);
-                } else if (numMatch) {
-                    if (!inList) {
-                        formattedLines.push('<ol style="margin-bottom: 10px; padding-left: 20px;">');
-                        inList = true;
-                    }
-                    formattedLines.push(`<li>${numMatch[2]}</li>`);
+            steps.forEach((s, i) => {
+                const el = document.getElementById(`step-${s}`);
+                if (i < currentIdx) {
+                    el.classList.add('done');
+                    el.classList.remove('active');
+                } else if (i === currentIdx) {
+                    el.classList.add('active');
+                    el.classList.remove('done');
                 } else {
-                    if (inList) {
-                        formattedLines.push(formattedLines[formattedLines.length-1].includes('ul') ? '</ul>' : '</ol>');
-                        inList = false;
-                    }
-                    formattedLines.push(line);
+                    el.classList.remove('active', 'done');
                 }
-            }
-            if (inList) formattedLines.push('</ul>');
-
-            // Join and add paragraph breaks for blocks of text
-            let finalHtml = formattedLines.join('\n')
-                .replace(/\n\n+/g, '</p><p style="margin-bottom: 12px;">')
-                .replace(/\n/g, '<br>');
-
-            answerText.innerHTML = `<p style="margin-bottom: 12px;">${finalHtml}</p>`;
+            });
         }
 
-        // ============================================
-        // Render stream metadata (sources, trace, analytics)
-        // ============================================
-        function renderStreamMetadata(event) {
-            const trace = event.retrieval_trace || {};
-            const analytics = event.analytics || {};
-            const sources = event.sources || [];
-
-            // Latency bar (partial — total will update on done)
-            let latencyHtml = `
-                <div class="latency-chip total" id="totalLatencyChip">
-                    Total <span class="value" id="totalLatencyValue">…</span>
-                </div>
-                <div class="latency-chip streaming-chip">⚡ Streaming</div>
-                <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">BM25 <span class="value">${(trace.lex_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>`;
-
-            if (trace.compress_ms) {
-                latencyHtml += `<div class="latency-chip">MMR <span class="value">${(trace.compress_ms).toFixed(0)}ms</span></div>`;
-            }
-
-            if (event.arxiv_api_fallback) {
-                latencyHtml += `<div class="latency-chip" style="background: var(--warning-bg); border-color: rgba(200, 140, 40, 0.2); color: var(--warning); font-weight: 600;">📚 Global ArXiv Search</div>`;
-            }
-
-            // Show detected query intent
-            if (event.intent) {
-                const intentColors = {
-                    explanatory: { bg: 'rgba(79, 70, 229, 0.08)', border: 'rgba(79, 70, 229, 0.2)', color: '#4f46e5', icon: '📖' },
-                    comparative: { bg: 'rgba(217, 119, 6, 0.08)', border: 'rgba(217, 119, 6, 0.2)', color: '#b45309', icon: '⚖️' },
-                    sota: { bg: 'rgba(16, 185, 129, 0.08)', border: 'rgba(16, 185, 129, 0.2)', color: '#059669', icon: '🚀' },
-                    technical: { bg: 'rgba(139, 92, 246, 0.08)', border: 'rgba(139, 92, 246, 0.2)', color: '#7c3aed', icon: '🔬' },
-                    discovery: { bg: 'var(--accent-bg)', border: 'rgba(139, 26, 26, 0.2)', color: 'var(--accent)', icon: '🔍' },
-                };
-                const ic = intentColors[event.intent] || intentColors.discovery;
-                latencyHtml += `<div class="latency-chip" style="background: ${ic.bg}; border-color: ${ic.border}; color: ${ic.color}; font-weight: 600;">${ic.icon} ${event.intent}</div>`;
-            }
-
-            latencyBar.innerHTML = latencyHtml;
-
-            // Analytics
-            renderAnalytics(analytics, sources.length);
-
-            // Sources
-            renderSources(sources);
-        }
-
-        function updateTotalLatency(totalMs) {
-            const el = document.getElementById('totalLatencyValue');
-            if (el) el.textContent = `${totalMs.toFixed(0)}ms`;
-        }
-
-        // ============================================
-        // Render Results (non-streaming fallback)
-        // ============================================
-        function renderResults(data) {
-            const trace = data.retrieval_trace || {};
-
-            // Latency bar
-            let latencyHtml = `
-                <div class="latency-chip total">
-                    Total <span class="value">${data.latency_ms.toFixed(0)}ms</span>
-                </div>`;
-
-            if (data.cached) {
-                latencyHtml += `<div class="latency-chip cached-chip">⚡ Cached</div>`;
-            }
-
-            latencyHtml += `
-                <div class="latency-chip">Dense <span class="value">${(trace.dense_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">BM25 <span class="value">${(trace.lex_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">Rerank <span class="value">${(trace.rerank_ms || 0).toFixed(0)}ms</span></div>
-                <div class="latency-chip">LLM <span class="value">${(trace.generation_ms || 0).toFixed(0)}ms</span></div>`;
-
-            if (trace.compress_ms) {
-                latencyHtml += `<div class="latency-chip">MMR <span class="value">${(trace.compress_ms).toFixed(0)}ms</span></div>`;
-            }
-            latencyBar.innerHTML = latencyHtml;
-
-            // Analytics
-            const analytics = data.analytics || {};
-            const sources = data.sources || [];
-            renderAnalytics(analytics, sources.length);
-
-            // Answer with references extraction
-            processAnswerReferences(data.answer);
-
-            // Sources
-            renderSources(sources);
-
-            resultsSection.classList.add('visible');
-        }
-
-        // ============================================
-        // Shared render helpers
-        // ============================================
-        function renderAnalytics(analytics, sourceCount) {
-            let analyticsHtml = '';
-
-
-            if (analytics.top_authors && analytics.top_authors.length > 0) {
-                analyticsHtml += `<div class="analytics-card">
-                    <h4>Top Authors</h4>
-                    <ul class="analytics-list">
-                        ${analytics.top_authors.map(a => `<li><span>${escapeHtml(a.name)}</span><span class="count">${a.count}</span></li>`).join('')}
-                    </ul>
-                </div>`;
-            }
-
-            if (analytics.total_unique_papers) {
-                analyticsHtml += `<div class="analytics-card">
-                    <h4>Search Coverage</h4>
-                    <ul class="analytics-list">
-                        <li><span>Unique papers considered</span><span class="count">${analytics.total_unique_papers}</span></li>
-                        <li><span>Sources returned</span><span class="count">${sourceCount}</span></li>
-                    </ul>
-                </div>`;
-            }
-            analyticsStrip.innerHTML = analyticsHtml;
-        }
-
-        function renderSources(sources) {
-            sourcesCount.textContent = `${sources.length} Sources Retrieved`;
-
-            sourcesList.innerHTML = sources.map((s, i) => {
-                const layer = s.layer || 'core';
-                const layerColors = {
-                    prerequisite: 'background: rgba(139, 92, 246, 0.08); color: #7c3aed; border-color: rgba(139, 92, 246, 0.3);',
-                    foundation: 'background: rgba(217, 119, 6, 0.08); color: #b45309; border-color: rgba(217, 119, 6, 0.3);',
-                    core: 'background: var(--accent-bg); color: var(--accent); border-color: rgba(139, 26, 26, 0.3);',
-                    latest: 'background: rgba(16, 185, 129, 0.08); color: #059669; border-color: rgba(16, 185, 129, 0.3);',
-                };
-                const layerTag = `<span class="source-tag" style="${layerColors[layer] || layerColors.core} font-weight: 600;">${layer.toUpperCase()}</span>`;
-                const isFoundational = (s.chunk_id || '').startsWith('arxiv_api_');
-                const foundationalBadge = isFoundational ? '<span class="source-tag" style="background: var(--warning-bg); color: var(--warning); border-color: rgba(200, 140, 40, 0.3); font-weight: 600;">FOUNDATIONAL</span>' : '';
-                const arxivLink = s.paper_id ? `https://arxiv.org/abs/${s.paper_id}` : '#';
-
-                // Show rerank score if > 0, otherwise label as "relevance" (fusion score)
-                const score = s.rerank_score || 0;
-                const scoreLabel = score > 0.01 ? 'relevance' : 'relevance';
-                const scoreDisplay = score > 0 ? score.toFixed(3) : '—';
-
-                return `
-                    <div class="source-card" id="source-${i}">
-                        <div class="source-meta" onclick="toggleSource(document.getElementById('source-${i}'))">
-                            <div class="source-rank">${i + 1}</div>
-                            <div class="source-title">${escapeHtml(s.title)}</div>
-                            <div class="source-score">${scoreLabel} ${scoreDisplay}</div>
-                        </div>
-                        <div class="source-text" onclick="toggleSource(document.getElementById('source-${i}'))">${escapeHtml(s.chunk_text)}</div>
-                        <div class="source-footer">
-                            ${foundationalBadge}
-                            ${layerTag}
-                            <button class="btn-similar" onclick="event.stopPropagation(); findSimilar('${s.paper_id}', 'source-${i}')">Similar Papers</button>
-                            <a class="source-link" href="${arxivLink}" target="_blank" onclick="event.stopPropagation()">View on ArXiv →</a>
-                        </div>
-                        <div class="similar-container" id="similar-${i}"></div>
+        function handleMetadata(data) {
+            const list = document.getElementById('sourcesList');
+            data.sources.forEach((s, i) => {
+                const card = document.createElement('div');
+                card.className = 'source-card';
+                card.innerHTML = `
+                    <div class="source-meta">
+                        <div class="source-rank">${i + 1}</div>
+                        <div class="source-title">${s.title}</div>
+                        ${s.rerank_score ? `<div class="source-score">Score: ${s.rerank_score.toFixed(3)}</div>` : ''}
+                    </div>
+                    <div class="source-text">${s.chunk_text}</div>
+                    <div class="source-footer">
+                        <span class="source-tag">By ${s.authors || 'Unknown'}</span>
+                        <span class="source-tag">${s.categories || 'ArXiv'}</span>
+                        <a href="https://arxiv.org/abs/${s.paper_id}" class="source-link" target="_blank">ArXiv ↗</a>
                     </div>
                 `;
-            }).join('');
-        }
-
-        // ============================================
-        // Loading Animation
-        // ============================================
-        function animateLoadingSteps() {
-            const steps = ['stepDense', 'stepBM25', 'stepRerank', 'stepGenerate'];
-            const labels = ['Dense retrieval (semantic search)', 'BM25 retrieval (lexical match)', 'Cross-encoder reranking', 'Generating answer'];
-            const delays = [0, 400, 900, 1500];
-
-            steps.forEach((id, i) => {
-                const el = document.getElementById(id);
-                el.className = 'loading-step';
-                el.textContent = (i === 0 ? '⟳ ' : '○ ') + labels[i];
+                list.appendChild(card);
             });
 
-            steps.forEach((id, i) => {
-                setTimeout(() => {
-                    const el = document.getElementById(id);
-                    el.classList.add('active');
-                    el.textContent = '⟳ ' + labels[i];
-
-                    if (i > 0) {
-                        const prev = document.getElementById(steps[i - 1]);
-                        prev.classList.remove('active');
-                        prev.classList.add('done');
-                        prev.textContent = '✓ ' + labels[i - 1];
-                    }
-                }, delays[i]);
-            });
+            document.getElementById('loadingOverlay').classList.remove('visible');
+            document.getElementById('resultsSection').classList.add('visible');
         }
 
-        // ============================================
-        // Similar Papers
-        // ============================================
-        async function findSimilar(paperId, sourceId) {
-            const idx = sourceId.split('-')[1];
-            const container = document.getElementById(`similar-${idx}`);
-
-            if (container.innerHTML) {
-                container.innerHTML = '';
-                return;
-            }
-
-            container.innerHTML = '<div class="similar-panel"><div class="loading-text">Finding similar papers…</div></div>';
-
-            try {
-                const resp = await fetch(`${API_BASE}/paper/${paperId}/similar?top_n=5`);
-                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-                const data = await resp.json();
-
-                if (data.similar_papers && data.similar_papers.length > 0) {
-                    container.innerHTML = `
-                        <div class="similar-panel">
-                            <h5>Similar Papers</h5>
-                            ${data.similar_papers.map(p => `
-                                <div class="similar-item">
-                                    <a href="https://arxiv.org/abs/${p.paper_id}" target="_blank">${escapeHtml(p.title)}</a>
-                                    <span class="sim-score">${(p.similarity_score * 100).toFixed(1)}%</span>
-                                </div>
-                            `).join('')}
-                        </div>`;
-                } else {
-                    container.innerHTML = '<div class="similar-panel"><div class="loading-text">No similar papers found.</div></div>';
-                }
-            } catch (err) {
-                container.innerHTML = `<div class="similar-panel"><div class="loading-text">Error: ${err.message}</div></div>`;
-            }
+        function handleToken(content) {
+            document.getElementById('answerText').innerText += content;
         }
 
-        // ============================================
-        // Helpers
-        // ============================================
+        function handleError(msg) {
+            const card = document.getElementById('errorCard');
+            card.innerText = msg;
+            card.classList.add('visible');
+            document.getElementById('loadingOverlay').classList.remove('visible');
+        }
+
+        function handleDone(data) {
+            document.getElementById('answerText').classList.remove('streaming');
+            const bar = document.getElementById('latencyBar');
+            bar.innerHTML = `
+                <div class="latency-chip total">Total: <span class="value">${data.total_ms}ms</span></div>
+            `;
+        }
+
         function useSample(el) {
-            queryInput.value = el.textContent;
+            document.getElementById('queryInput').value = el.innerText;
             submitQuery();
         }
 
-        function toggleSource(el) {
-            const textEl = el.querySelector('.source-text');
-            if (textEl) textEl.classList.toggle('expanded');
+        // Health check
+        async function checkHealth() {
+            try {
+                const res = await fetch(`${API_BASE}/health`);
+                if (res.ok) {
+                    document.getElementById('statusText').innerText = 'Connected';
+                    document.getElementById('statusBadge').style.color = 'var(--success)';
+                }
+            } catch (e) {}
         }
-
-        function escapeHtml(str) {
-            if (!str) return '';
-            const div = document.createElement('div');
-            div.textContent = str;
-            return div.innerHTML;
-        }
+        checkHealth();
     </script>
 </body>
 </html>

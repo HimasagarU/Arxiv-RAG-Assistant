@@ -1396,7 +1396,13 @@ async def query_stream_endpoint(request: QueryRequest):
     t0 = time.time()
     _state["query_count"] += 1
 
-    from api.retrieval import classify_query_intent
+    from api.retrieval import (
+        classify_query_intent, 
+        INTENT_TECHNICAL, 
+        INTENT_EXPLANATORY, 
+        INTENT_EVIDENCE, 
+        INTENT_SOTA
+    )
     intent = classify_query_intent(request.query)
 
     target_top_n = min(request.top_k, get_context_size(intent))

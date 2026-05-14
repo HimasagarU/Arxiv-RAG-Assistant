@@ -9,18 +9,12 @@ import { streamPublicQuery } from '../api';
 // Real retrieval steps that match the backend pipeline order.
 // Shown in sequence during loading; the stream metadata updates them.
 const PIPELINE_STEPS = [
-  { id: 'intent',      label: 'Classifying query intent…'          },
-  { id: 'hyde',        label: 'Generating HyDE passage…'            },
-  { id: 'expand',      label: 'Expanding query variants…'           },
-  { id: 'dense',       label: 'Dense vector search (Qdrant)…'       },
-  { id: 'lexical',     label: 'BM25 lexical retrieval…'             },
-  { id: 'rrf',         label: 'Fusing results with RRF…'            },
-  { id: 'parent',      label: 'Parent-child chunk expansion…'       },
-  { id: 'citation',    label: 'Citation-graph boost…'               },
-  { id: 'rerank',      label: 'BGE-Reranker-v2-m3…'                 },
-  { id: 'mmr',         label: 'MMR diversity filter…'               },
-  { id: 'compress',    label: 'Compressing context…'                },
-  { id: 'generate',    label: 'Generating answer with Groq…'        },
+  { id: 'Expanding query',                   label: 'Expanding query variants…'           },
+  { id: 'Hybrid retrieval',                  label: 'Dense & Lexical retrieval…'          },
+  { id: 'Reranking (Cross-Encoder)',         label: 'BGE-Reranker-Base…'                 },
+  { id: 'MMR Diversity Filtering',           label: 'MMR diversity filter…'               },
+  { id: 'Context Compression & Synthesis',   label: 'Compressing context…'                },
+  { id: 'Synthesizing Answer',               label: 'Generating answer with Groq…'        },
 ];
 
 function LandingPage() {
@@ -45,7 +39,6 @@ function LandingPage() {
   const [streaming, setStreaming] = useState(false);
 
   const answerRef = useRef(null);
-  const stepTimerRef = useRef(null);
 
   const API_BASE = (import.meta.env.VITE_API_URL || 'https://himasagaru-arxiv-rag-mechanistic-interpretability.hf.space').replace(/\/$/, '');
 
@@ -65,28 +58,19 @@ function LandingPage() {
     checkHealth();
   }, [API_BASE]);
 
-  // Advance a fake step ticker while waiting for the real stream metadata
-  function startStepTicker() {
-    let idx = 0;
-    setActiveStep(0);
-    setDoneSteps(new Set());
-    stepTimerRef.current = setInterval(() => {
-      idx += 1;
-      if (idx < PIPELINE_STEPS.length - 1) {
-        setDoneSteps((prev) => new Set([...prev, PIPELINE_STEPS[idx - 1].id]));
-        setActiveStep(idx);
-      } else {
-        clearInterval(stepTimerRef.current);
-      }
-    }, 900);
-  }
-
-  function stopStepTicker(completedUpTo) {
-    clearInterval(stepTimerRef.current);
-    // Mark all steps up to generate as done
-    const allDone = new Set(PIPELINE_STEPS.slice(0, completedUpTo ?? PIPELINE_STEPS.length - 1).map((s) => s.id));
-    setDoneSteps(allDone);
-    setActiveStep(PIPELINE_STEPS.length - 1); // "generating" step
+  function updateProgress(stage) {
+    const stepIdx = PIPELINE_STEPS.findIndex(s => s.id === stage);
+    if (stepIdx !== -1) {
+      setActiveStep(stepIdx);
+      // Mark all previous steps as done
+      setDoneSteps(prev => {
+        const next = new Set(prev);
+        for (let i = 0; i < stepIdx; i++) {
+          next.add(PIPELINE_STEPS[i].id);
+        }
+        return next;
+      });
+    }
   }
 
   const submitQuery = async () => {
@@ -96,7 +80,8 @@ function LandingPage() {
     setError('');
     setStreamingText('');
     setSources([]);
-    startStepTicker();
+    setStreamingText('');
+    setSources([]);
 
     let metaReceived = false;
 
@@ -105,11 +90,15 @@ function LandingPage() {
       startYear: filterYear ? parseInt(filterYear) : null,
       author: filterAuthor || null,
 
+      onStatus: (stage) => {
+        updateProgress(stage);
+      },
+
       onMetadata: (meta) => {
         metaReceived = true;
         setSources(meta.sources || []);
-        // Stop ticker and advance to generate step
-        stopStepTicker(PIPELINE_STEPS.length - 1);
+        // Advance to final stage when metadata arrives if not already there
+        updateProgress('Synthesizing Answer');
         setStreaming(true);
       },
 
@@ -122,7 +111,7 @@ function LandingPage() {
 
       onError: (msg) => {
         setError(msg || 'Failed to get answer. Please try again.');
-        clearInterval(stepTimerRef.current);
+        setLoading(false);
       },
 
       onDone: (finalSources) => {
@@ -190,7 +179,7 @@ function LandingPage() {
           <h2 className="font-heading text-4xl font-bold mb-3 text-[var(--color-text-primary)]">Mechanistic Interpretability Research</h2>
           <p className="text-[var(--color-text-secondary)] max-w-2xl mx-auto">
             Ask questions about transformer circuits, sparse autoencoders, activation patching, and more.
-            Powered by hybrid dense + BM25 retrieval, HyDE, query expansion, and cross-encoder reranking.
+            Powered by hybrid dense + BM25 retrieval, HyDE, query expansion, and BGE-Reranker-Base.
           </p>
         </section>
 

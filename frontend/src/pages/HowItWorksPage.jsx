@@ -71,10 +71,10 @@ const steps = [
   },
   {
     icon: '⚖️',
-    title: 'BGE Reranker v2-m3',
+    title: 'BGE Reranker Base',
     description:
-      'The unified candidate list undergoes rigorous re-evaluation using BAAI/bge-reranker-v2-m3. This cross-encoder model analyzes the full interaction between the query and each passage, generating a definitive relevance score that selects the most precise 6 evidence blocks for generation.',
-    details: ['BGE-Reranker-v2-m3', 'Joint query-passage scoring', 'FINAL_TOP_N = 6 passages'],
+      'The unified candidate list undergoes rigorous re-evaluation using BAAI/bge-reranker-base. This cross-encoder model analyzes the full interaction between the query and each passage, generating a definitive relevance score that selects the most precise evidence blocks for generation.',
+    details: ['BAAI/bge-reranker-base', 'Joint query-passage scoring', 'FINAL_TOP_N = 6 passages'],
     color: '#ec4899',
   },
   {
