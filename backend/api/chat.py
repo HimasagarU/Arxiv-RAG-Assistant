@@ -4,22 +4,25 @@ chat.py — Conversation and message management endpoints.
 Endpoints:
     POST   /conversations                   — Create new conversation
     GET    /conversations                   — List user's conversations
-    GET    /conversations/{id}/messages      — Get message history
-    POST   /conversations/{id}/query         — Chat within a conversation
-    DELETE /conversations/{id}               — Soft-delete conversation
+    GET    /conversations/{id}/messages     — Get message history
+    POST   /conversations/{id}/query        — Chat within a conversation (JSON)
+    POST   /conversations/{id}/query/stream — SSE: retrieval_start, retrieval_done, token, done, error
+    DELETE /conversations/{id}              — Soft-delete conversation
 
 Features:
-    - Sliding window context (last 4 turns) to control Groq token usage
+    - Sliding window context (last 4 turns) to control Gemini token usage
     - 20-query-per-conversation hard cap
     - Redis session caching for fast page reload
     - Redis query cache for duplicate question avoidance
     - Optional paper_id scoping for document-specific chats
 """
 
+import asyncio
 import json
 import logging
 import os
 import time
+from functools import partial
 from typing import Optional
 from uuid import UUID
 
@@ -27,7 +30,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
@@ -44,6 +47,7 @@ from db.app_models import Conversation, Message, User
 load_dotenv()
 
 log = logging.getLogger(__name__)
+GENERATION_CONTEXT_TOP_N = int(os.getenv("GENERATION_CONTEXT_TOP_N", "20"))
 
 router = APIRouter(prefix="/conversations", tags=["Chat"])
 
@@ -168,7 +172,7 @@ async def list_conversations(
         select(Conversation)
         .where(
             Conversation.user_id == current_user.id,
-            Conversation.is_deleted == False,
+            Conversation.is_deleted.is_(False),
         )
         .order_by(Conversation.updated_at.desc())
         .limit(limit)
@@ -186,10 +190,10 @@ async def get_messages(
 ):
     """Get message history for a conversation (tries Redis cache first)."""
     # Verify ownership
-    conv = await _get_user_conversation(db, conversation_id, current_user.id)
+    await _get_user_conversation(db, conversation_id, current_user.id)
 
     # Try Redis cache first for fast reload
-    cached = get_cached_messages(str(conversation_id))
+    cached = await get_cached_messages(str(conversation_id))
     if cached:
         log.debug(f"Chat session cache HIT for {conversation_id}")
         return [
@@ -213,6 +217,187 @@ async def get_messages(
     return [_msg_to_response(m) for m in messages]
 
 
+def _sse_event(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+@router.post("/{conversation_id}/query/stream")
+async def chat_query_stream(
+    conversation_id: UUID,
+    body: ChatQueryRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_app_db),
+):
+    """SSE streaming variant of chat query (retrieval progress + answer tokens)."""
+    conv = await _get_user_conversation(db, conversation_id, current_user.id)
+
+    user_msg_count = conv.message_count // 2
+    if user_msg_count >= MAX_QUERIES_PER_CONVERSATION:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Query limit reached ({MAX_QUERIES_PER_CONVERSATION} per conversation).",
+        )
+
+    cached = await get_cached_response(body.query, conv.paper_id)
+    if cached:
+
+        async def cached_gen():
+            yield _sse_event("retrieval_start", {"query": body.query, "cached": True})
+            yield _sse_event(
+                "retrieval_done",
+                {
+                    "num_chunks": len(cached.get("sources", [])),
+                    "trace": cached.get("retrieval_trace", {}),
+                    "cached": True,
+                },
+            )
+            ans = cached.get("answer", "")
+            if ans:
+                yield _sse_event("token", {"content": ans})
+            await _save_messages(
+                db,
+                conv,
+                body.query,
+                ans,
+                json.dumps(cached.get("sources", []), default=str),
+            )
+            yield _sse_event(
+                "done",
+                {"sources": cached.get("sources", []), "message_count": conv.message_count, "cached": True},
+            )
+
+        return StreamingResponse(cached_gen(), media_type="text/event-stream")
+
+    result = await db.execute(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+    )
+    history = result.scalars().all()
+    context_window = _build_sliding_window(list(history))
+
+    from api.app import (
+        GenerationSurface,
+        _state,
+        build_prompt,
+        compress_context_with_llm,
+        generate_answer,
+        generate_hyde_excerpt,
+        stream_generate_answer,
+        get_context_size,
+        verify_answer,
+    )
+    from api.retrieval import classify_query_intent
+
+    if _state["retriever"] is None:
+        raise HTTPException(status_code=503, detail="Retriever not initialized.")
+
+    intent = classify_query_intent(body.query)
+    retrieve_kwargs: dict = {
+        "top_n": max(body.top_k, get_context_size(intent)),
+        "intent": intent,
+    }
+    if conv.paper_id:
+        retrieve_kwargs["paper_id"] = conv.paper_id
+
+    generation_surface = (
+        GenerationSurface.DOCUMENT_CHAT if conv.paper_id else GenerationSurface.CHAT
+    )
+
+    async def event_gen():
+        try:
+            yield _sse_event("retrieval_start", {"query": body.query})
+            t0 = time.time()
+
+            rk = dict(retrieve_kwargs)
+            hyde_inner = await asyncio.to_thread(generate_hyde_excerpt, body.query, intent)
+            if hyde_inner:
+                rk["dense_auxiliary_text"] = hyde_inner
+
+            retrieval_result = await asyncio.to_thread(
+                lambda: _state["retriever"].retrieve(body.query, **rk),
+            )
+            passages = retrieval_result["passages"]
+            trace = retrieval_result["trace"]
+            trace["total_ms"] = round((time.time() - t0) * 1000, 1)
+
+            yield _sse_event(
+                "retrieval_done",
+                {"num_chunks": len(passages), "trace": trace},
+            )
+
+            compressed = await asyncio.to_thread(
+                _state["retriever"].compress_context,
+                body.query,
+                passages,
+                intent=intent,
+            )
+            llm_compressed = await asyncio.to_thread(
+                compress_context_with_llm,
+                body.query,
+                passages,
+            )
+            if llm_compressed:
+                compressed = llm_compressed
+
+            if conv.paper_id:
+                prompt = _build_document_chat_prompt(body.query, compressed, passages, context_window)
+            else:
+                prompt = build_prompt(body.query, compressed, passages, intent=intent)
+
+            answer_parts: list[str] = []
+            _STOP = object()
+            it = iter(stream_generate_answer(prompt, intent=intent, surface=generation_surface))
+            while True:
+                piece = await asyncio.to_thread(partial(next, it, _STOP))
+                if piece is _STOP:
+                    break
+                if piece:
+                    answer_parts.append(piece)
+                    yield _sse_event("token", {"content": piece})
+
+            full_answer = "".join(answer_parts)
+            if not full_answer.strip():
+                full_answer = await asyncio.to_thread(
+                    generate_answer, prompt, intent=intent, surface=generation_surface
+                )
+            
+            full_answer_verified = verify_answer(full_answer, passages)
+            if full_answer_verified != full_answer:
+                warning_text = full_answer_verified[len(full_answer):]
+                yield _sse_event("token", {"content": warning_text})
+                full_answer = full_answer_verified
+
+            sources = [
+                {
+                    "chunk_id": p["chunk_id"],
+                    "paper_id": p["paper_id"],
+                    "title": p["title"],
+                    "authors": p.get("authors", ""),
+                    "chunk_text": p["chunk_text"],
+                    "rerank_score": p.get("rerank_score", 0.0),
+                }
+                for p in passages
+            ]
+            sources_str = json.dumps(sources, default=str)
+            await _save_messages(db, conv, body.query, full_answer, sources_str)
+            await set_cached_response(
+                body.query,
+                {"answer": full_answer, "sources": sources, "retrieval_trace": trace},
+                paper_id=conv.paper_id,
+            )
+            yield _sse_event(
+                "done",
+                {"sources": sources, "message_count": conv.message_count, "cached": False},
+            )
+        except Exception as exc:
+            log.exception("chat_query_stream failed")
+            yield _sse_event("error", {"ok": False, "message": str(exc), "phase": "stream"})
+            yield _sse_event("done", {"ok": False, "message": str(exc), "sources": [], "message_count": conv.message_count, "cached": False})
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
 @router.post("/{conversation_id}/query", response_model=ChatQueryResponse)
 async def chat_query(
     conversation_id: UUID,
@@ -228,7 +413,7 @@ async def chat_query(
     2. Check Redis cache for duplicate query
     3. Build sliding window context from history
     4. Run retrieval (paper-scoped if conversation has paper_id)
-    5. Generate answer via Groq
+    5. Generate answer via Gemini, with Groq fallback on Gemini rate limits
     6. Save messages to DB + Redis
     """
     conv = await _get_user_conversation(db, conversation_id, current_user.id)
@@ -243,7 +428,7 @@ async def chat_query(
         )
 
     # --- 2. Check Redis query cache ---
-    cached = get_cached_response(body.query, conv.paper_id)
+    cached = await get_cached_response(body.query, conv.paper_id)
     if cached:
         # Still save messages so history is consistent
         await _save_messages(
@@ -268,7 +453,16 @@ async def chat_query(
     context_window = _build_sliding_window(list(history))
 
     # --- 4. Run retrieval pipeline ---
-    from api.app import _state, build_prompt, generate_answer
+    from api.app import (
+        GenerationSurface,
+        _state,
+        build_prompt,
+        compress_context_with_llm,
+        generate_answer,
+        generate_hyde_excerpt,
+        get_context_size,
+        verify_answer,
+    )
     from api.retrieval import classify_query_intent
 
     if _state["retriever"] is None:
@@ -279,19 +473,26 @@ async def chat_query(
 
     # Build retrieval kwargs
     retrieve_kwargs = {
-        "top_n": body.top_k,
+        "top_n": max(body.top_k, get_context_size(intent)),
         "intent": intent,
     }
     # Paper-scoped retrieval
     if conv.paper_id:
         retrieve_kwargs["paper_id"] = conv.paper_id
 
+    hyde = generate_hyde_excerpt(body.query, intent)
+    if hyde:
+        retrieve_kwargs["dense_auxiliary_text"] = hyde
+
     retrieval_result = _state["retriever"].retrieve(body.query, **retrieve_kwargs)
     passages = retrieval_result["passages"]
     trace = retrieval_result["trace"]
 
-    # Compress context
+    # Compress context (optional LLM compression for very long evidence)
     compressed = _state["retriever"].compress_context(body.query, passages, intent=intent)
+    llm_compressed = compress_context_with_llm(body.query, passages)
+    if llm_compressed:
+        compressed = llm_compressed
 
     # --- Build prompt with conversation history ---
     if conv.paper_id:
@@ -301,7 +502,11 @@ async def chat_query(
         prompt = build_prompt(body.query, compressed, passages, intent=intent)
 
     # --- 5. Generate answer ---
-    answer = generate_answer(prompt, intent=intent)
+    generation_surface = (
+        GenerationSurface.DOCUMENT_CHAT if conv.paper_id else GenerationSurface.CHAT
+    )
+    answer = generate_answer(prompt, intent=intent, surface=generation_surface)
+    answer = verify_answer(answer, passages)
     trace["total_ms"] = round((time.time() - t0) * 1000, 1)
 
     # Build sources list
@@ -322,7 +527,7 @@ async def chat_query(
     await _save_messages(db, conv, body.query, answer, sources_str)
 
     # Cache in Redis
-    set_cached_response(body.query, {
+    await set_cached_response(body.query, {
         "answer": answer,
         "sources": sources,
         "retrieval_trace": trace,
@@ -346,7 +551,7 @@ async def delete_conversation(
     conv = await _get_user_conversation(db, conversation_id, current_user.id)
     conv.is_deleted = True
     await db.flush()
-    invalidate_session_cache(str(conversation_id))
+    await invalidate_session_cache(str(conversation_id))
     log.info(f"Conversation soft-deleted: {conversation_id}")
 
 
@@ -362,7 +567,7 @@ async def _get_user_conversation(
         select(Conversation).where(
             Conversation.id == conversation_id,
             Conversation.user_id == user_id,
-            Conversation.is_deleted == False,
+            Conversation.is_deleted.is_(False),
         )
     )
     conv = result.scalar_one_or_none()
@@ -401,8 +606,8 @@ async def _save_messages(
     await db.flush()
 
     # Update Redis session cache
-    cache_message(str(conv.id), "user", user_content)
-    cache_message(str(conv.id), "assistant", assistant_content, sources_json)
+    await cache_message(str(conv.id), "user", user_content)
+    await cache_message(str(conv.id), "assistant", assistant_content, sources_json)
 
 
 def _build_document_chat_prompt(
@@ -431,10 +636,11 @@ def _build_document_chat_prompt(
 
 CRITICAL RULES:
 1. Your answer MUST be grounded ONLY in the provided document chunks below.
-2. Do NOT use any external knowledge. If the document chunks do not contain the answer, say:
-   "The document does not contain information about this. Please try rephrasing your question."
-3. Use numbered citations [1], [2] to reference the source chunks.
-4. Be concise but thorough. Use the Feynman Technique for explanations.
+2. Do NOT use any external knowledge.
+3. If the provided chunks are partial but relevant, give the best grounded answer you can and explicitly note any uncertainty or missing sections.
+4. Only say "The document does not contain enough information in the retrieved chunks to answer this reliably." when the retrieved chunks are clearly insufficient or irrelevant.
+5. Use numbered citations [1], [2] to reference the source chunks.
+6. Be concise but thorough. Use the Feynman Technique for explanations.
 
 CONVERSATION HISTORY:
 {history_str if history_str else "(No prior messages)"}

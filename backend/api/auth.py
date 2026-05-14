@@ -17,6 +17,7 @@ Security:
 import logging
 import os
 import time
+import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -45,6 +46,29 @@ JWT_SECRET = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
 REFRESH_TOKEN_EXPIRE = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+JWT_TOKEN_VERSION = int(os.getenv("JWT_TOKEN_VERSION", "1"))
+
+_redis_state = None  # None=lazy, "disabled"=unavailable, else Redis client
+
+
+def _sync_redis():
+    global _redis_state
+    if _redis_state == "disabled":
+        return None
+    if _redis_state is not None:
+        return _redis_state
+    url = (os.getenv("REDIS_URL", "") or "").strip()
+    if not url:
+        _redis_state = "disabled"
+        return None
+    try:
+        import redis as sync_redis
+
+        _redis_state = sync_redis.from_url(url, decode_responses=True, socket_connect_timeout=2)
+    except Exception as e:
+        log.warning("Auth: Redis unavailable (%s); using in-memory rate limits only.", e)
+        _redis_state = "disabled"
+    return _redis_state if _redis_state != "disabled" else None
 
 
 def _bcrypt_password_bytes(password: str, *, strict: bool) -> bytes:
@@ -87,21 +111,83 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 _login_attempts: dict[str, list[float]] = defaultdict(list)
 MAX_LOGIN_ATTEMPTS = 5
 LOGIN_WINDOW_SECONDS = 60
+MAX_EMAIL_FAILS = 8
+EMAIL_LOCKOUT_SECONDS = 900
 
 
 def _check_rate_limit(ip: str) -> None:
-    """Raise 429 if IP has exceeded login attempt limit."""
+    """Raise 429 if IP has exceeded login attempt limit (Redis or in-memory)."""
+    r = _sync_redis()
     now = time.time()
-    # Prune old attempts
-    _login_attempts[ip] = [
-        t for t in _login_attempts[ip] if now - t < LOGIN_WINDOW_SECONDS
-    ]
+    if r:
+        try:
+            k = f"login:ip:{ip}"
+            n = int(r.incr(k))
+            if n == 1:
+                r.expire(k, LOGIN_WINDOW_SECONDS)
+            if n > MAX_LOGIN_ATTEMPTS:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many login attempts. Please wait a minute.",
+                )
+            return
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.debug("Redis IP rate limit fallback: %s", e)
+
+    _login_attempts[ip] = [t for t in _login_attempts[ip] if now - t < LOGIN_WINDOW_SECONDS]
     if len(_login_attempts[ip]) >= MAX_LOGIN_ATTEMPTS:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many login attempts. Please wait a minute.",
         )
     _login_attempts[ip].append(now)
+
+
+def _check_email_lockout(email: str) -> None:
+    r = _sync_redis()
+    if r:
+        try:
+            if r.get(f"login:lock:{email.lower()}"):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many failed attempts for this account. Try again later.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+
+def _record_login_failure(email: str) -> None:
+    r = _sync_redis()
+    key = email.lower()
+    if r:
+        try:
+            fk = f"login:fail:{key}"
+            n = int(r.incr(fk))
+            if n == 1:
+                r.expire(fk, EMAIL_LOCKOUT_SECONDS)
+            if n >= MAX_EMAIL_FAILS:
+                r.setex(f"login:lock:{key}", EMAIL_LOCKOUT_SECONDS, "1")
+        except Exception as e:
+            log.debug("login fail counter: %s", e)
+    else:
+        _email_fail_times[key].append(time.time())
+
+
+_email_fail_times: dict[str, list[float]] = defaultdict(list)
+
+
+def _clear_login_failures(email: str) -> None:
+    r = _sync_redis()
+    if r:
+        try:
+            r.delete(f"login:fail:{email.lower()}")
+        except Exception:
+            pass
+    _email_fail_times.pop(email.lower(), None)
 
 
 # ---------------------------------------------------------------------------
@@ -146,15 +232,48 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     expire = datetime.now(timezone.utc) + (
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE)
     )
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update(
+        {"exp": expire, "type": "access", "ver": JWT_TOKEN_VERSION}
+    )
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def create_refresh_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE)
-    to_encode.update({"exp": expire, "type": "refresh"})
+    jti = str(uuid.uuid4())
+    to_encode.update(
+        {"exp": expire, "type": "refresh", "jti": jti, "ver": JWT_TOKEN_VERSION}
+    )
     return jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+def _refresh_revoked(jti: str) -> bool:
+    if not jti:
+        return False
+    r = _sync_redis()
+    if not r:
+        return False
+    try:
+        return bool(r.exists(f"auth:revoked_refresh:{jti}"))
+    except Exception:
+        return False
+
+
+def _revoke_refresh_jti(jti: str) -> None:
+    if not jti:
+        return
+    r = _sync_redis()
+    if not r:
+        return
+    try:
+        r.setex(
+            f"auth:revoked_refresh:{jti}",
+            REFRESH_TOKEN_EXPIRE * 86400 + 60,
+            "1",
+        )
+    except Exception as e:
+        log.debug("revoke refresh: %s", e)
 
 
 def _user_to_dict(user: User) -> dict:
@@ -189,6 +308,11 @@ async def get_current_user(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid token type.",
+            )
+        if int(payload.get("ver", 1)) != JWT_TOKEN_VERSION:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Token version invalid; please sign in again.",
             )
         user_id: str = payload.get("sub")
         if user_id is None:
@@ -256,11 +380,13 @@ async def login(
     """Authenticate user and return JWT tokens."""
     client_ip = request.client.host if request.client else "unknown"
     _check_rate_limit(client_ip)
+    _check_email_lockout(body.email)
 
     result = await db.execute(select(User).where(User.email == body.email))
     user = result.scalar_one_or_none()
 
     if user is None or not verify_password(body.password, user.hashed_password):
+        _record_login_failure(body.email)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password.",
@@ -272,6 +398,7 @@ async def login(
             detail="Account is deactivated.",
         )
 
+    _clear_login_failures(body.email)
     access = create_access_token({"sub": str(user.id)})
     refresh = create_refresh_token({"sub": str(user.id)})
 
@@ -293,7 +420,12 @@ async def refresh_token(
         payload = jwt.decode(body.refresh_token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Invalid token type.")
+        if int(payload.get("ver", 1)) != JWT_TOKEN_VERSION:
+            raise HTTPException(status_code=401, detail="Token version invalid.")
         user_id = payload.get("sub")
+        jti = payload.get("jti")
+        if _refresh_revoked(str(jti or "")):
+            raise HTTPException(status_code=401, detail="Refresh token revoked.")
     except JWTError:
         raise HTTPException(status_code=401, detail="Refresh token expired or invalid.")
 
@@ -302,9 +434,10 @@ async def refresh_token(
     if user is None or not user.is_active:
         raise HTTPException(status_code=401, detail="User not found.")
 
+    _revoke_refresh_jti(str(jti or ""))
+
     access = create_access_token({"sub": str(user.id)})
     refresh = create_refresh_token({"sub": str(user.id)})
-
     return TokenResponse(
         access_token=access,
         refresh_token=refresh,

@@ -12,9 +12,8 @@ The background ingestion task reuses the existing ingest pipeline
 
 import logging
 import os
-import time
-import threading
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import Optional
@@ -23,18 +22,22 @@ from uuid import UUID
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from db.app_database import get_app_db, async_session_factory
+from api.cache import bump_query_cache_buster_sync
+from db.app_database import get_app_db
 from db.app_models import DocumentJob, User
+from utils.section_labels import normalize_section_label
 
 load_dotenv()
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
+
+JOB_ACTIVE_STATUSES = frozenset({"queued", "downloading", "chunking", "embedding"})
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +162,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         abstract = entry.get("summary", "").strip()
         authors = ", ".join(a.get("name", "") for a in entry.get("authors", []))
         categories = ", ".join(t.get("term", "") for t in entry.get("tags", []))
+        published_raw = entry.get("published") or entry.get("updated") or ""
 
         # Download PDF
         actual_pdf_url = pdf_url or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
@@ -186,8 +190,6 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
 
         # Extract text from PDF
         import fitz  # PyMuPDF
-        import io
-
         doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         full_text = "\n".join(page.get_text() for page in doc)
         doc.close()
@@ -207,6 +209,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             "categories": categories,
             "full_text": full_text,
             "abstract": abstract,
+            "published": published_raw,
             "layer": "core",
         }
         chunks = chunk_paper(paper_dict, tokenizer)
@@ -231,17 +234,24 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             "authors": authors,
             "categories": categories,
             "pdf_url": actual_pdf_url,
-            "full_text": full_text[:200000],
+            "full_text": "",  # Stop storing massive full text in Neon
             "download_status": "downloaded",
             "parse_status": "parsed",
             "is_seed": False,
             "layer": "core",
             "source": "user_upload",
         })
-
-        # Store chunks in Neon DB
-        db.insert_chunks_batch(chunks)
         db.commit()
+
+        # Persist chunks locally for offline rebuilds
+        try:
+            chunks_path = Path(os.getenv("DATA_DIR", "data")) / "chunks.jsonl"
+            with open(chunks_path, "a", encoding="utf-8") as f:
+                for chunk in chunks:
+                    f.write(json.dumps(chunk) + "\n")
+            log.info(f"[Ingest] Appended {len(chunks)} chunks to {chunks_path}")
+        except Exception as e:
+            log.error(f"[Ingest] Failed to append chunks to offline JSONL: {e}")
 
         # Embed and upsert to Qdrant
         try:
@@ -249,18 +259,31 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             if _state["retriever"] is not None:
                 retriever = _state["retriever"]
                 from qdrant_client.models import PointStruct
-                from uuid import uuid5, NAMESPACE_URL
+                from utils.ids import chunk_id_to_uuid
 
-                texts = [c["chunk_text"] for c in chunks]
-                embeddings = retriever.embed_model.encode(
-                    texts, batch_size=32,
-                    convert_to_numpy=True,
-                    normalize_embeddings=True,
-                )
+                texts = [c.get("contextual_text", c["chunk_text"]) for c in chunks]
+                
+                # Streaming batch loop to prevent OOM on large papers
+                INGEST_EMBED_BATCH_SIZE = int(os.getenv("INGEST_EMBED_BATCH_SIZE", "32"))
+                all_embeddings = []
+                log.info(f"[Ingest] Embedding {len(texts)} chunks in batches of {INGEST_EMBED_BATCH_SIZE}...")
+                
+                for i in range(0, len(texts), INGEST_EMBED_BATCH_SIZE):
+                    batch_texts = texts[i : i + INGEST_EMBED_BATCH_SIZE]
+                    batch_embs = retriever.embed_model.encode(
+                        batch_texts, 
+                        batch_size=INGEST_EMBED_BATCH_SIZE,
+                        convert_to_numpy=True,
+                        normalize_embeddings=True,
+                    )
+                    all_embeddings.append(batch_embs)
+                
+                embeddings = np.vstack(all_embeddings)
 
                 points = []
                 for i, chunk in enumerate(chunks):
-                    point_id = str(uuid5(NAMESPACE_URL, chunk["chunk_id"]))
+                    point_id = chunk_id_to_uuid(chunk["chunk_id"])
+                    sec = normalize_section_label(chunk.get("section_hint", "other"))
                     points.append(PointStruct(
                         id=point_id,
                         vector=embeddings[i].tolist(),
@@ -271,9 +294,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
                             "authors": chunk.get("authors", ""),
                             "categories": chunk.get("categories", ""),
                             "chunk_text": chunk["chunk_text"],
+                            "contextual_text": chunk.get("contextual_text", chunk["chunk_text"]),
                             "chunk_type": chunk.get("chunk_type", "text"),
                             "modality": "text",
-                            "section_hint": chunk.get("section_hint", "other"),
+                            "section_hint": sec,
                             "layer": chunk.get("layer", "core"),
                             "token_count": chunk.get("token_count", 0),
                             "chunk_index": chunk.get("chunk_index", 0),
@@ -302,6 +326,30 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         # Stage 4: Done
         _update_job("done", title=paper_title, chunks=len(chunks))
         log.info(f"[Ingest] Paper {arxiv_id} ingestion complete ({len(chunks)} chunks).")
+        bump_query_cache_buster_sync()
+
+        # Trigger background BM25 artifact rebuild
+        def _rebuild_bm25():
+            log.info("[Ingest] Triggering offline BM25 artifact rebuild for new document...")
+            try:
+                from index import build_bm25
+                build_bm25.main()
+                log.info("[Ingest] BM25 artifact rebuild successful.")
+                # We can hot-reload the retriever's BM25 index from disk
+                try:
+                    from api.app import _state
+                    if _state.get("retriever"):
+                        import joblib
+                        bm25_path = Path(os.getenv("DATA_DIR", "data")) / "bm25_v1.pkl"
+                        _state["retriever"].bm25 = joblib.load(bm25_path)
+                        _state["retriever"].bm25_dirty = False
+                        log.info("[Ingest] Hot-reloaded BM25Okapi index into live Retriever.")
+                except Exception as ex:
+                    log.warning(f"Failed to hot-reload BM25 index: {ex}")
+            except Exception as e:
+                log.error(f"[Ingest] Failed to rebuild BM25 artifacts: {e}")
+
+        threading.Thread(target=_rebuild_bm25, daemon=True).start()
 
     except Exception as e:
         log.error(f"[Ingest] Fatal error for {arxiv_id}: {e}")
@@ -356,7 +404,7 @@ async def add_document(
         select(DocumentJob).where(
             DocumentJob.user_id == current_user.id,
             DocumentJob.arxiv_id == body.arxiv_id,
-            DocumentJob.status.in_(["queued", "downloading", "chunking", "embedding"]),
+            DocumentJob.status.in_(list(JOB_ACTIVE_STATUSES)),
         )
     )
     if existing.scalar_one_or_none():

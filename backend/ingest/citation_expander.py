@@ -323,7 +323,7 @@ def expand_seed_references(db, seed_paper_id: str, s2_paper_id: str):
     references = s2_get_references(s2_paper_id)
     if references is None:
         log.warning(f"  Failed to fetch references for {seed_paper_id}; will retry next run")
-        return accepted, False
+        return 0, False
     log.info(f"  Found {len(references)} references")
 
     accepted = 0
@@ -402,7 +402,7 @@ def expand_seed_citations(db, seed_paper_id: str, s2_paper_id: str):
     citations = s2_get_citations(s2_paper_id)
     if citations is None:
         log.warning(f"  Failed to fetch citations for {seed_paper_id}; will retry next run")
-        return accepted, False
+        return 0, False
     log.info(f"  Found {len(citations)} citing papers")
 
     accepted = 0
@@ -484,6 +484,7 @@ def expand_all_seeds(db, resume: bool = True, reset_state: bool = False):
 
         # Look up S2 ID if not stored
         if not s2_id and record.get("lookup_status") != "done":
+            db.commit()
             s2_data = s2_lookup_paper(paper_id)
             if s2_data:
                 s2_id = s2_data.get("paperId", "")
@@ -511,6 +512,7 @@ def expand_all_seeds(db, resume: bool = True, reset_state: bool = False):
 
         # Backward expansion
         if record.get("references_status") != "done":
+            db.commit()
             refs_added, refs_ok = expand_seed_references(db, paper_id, s2_id)
             total_refs += refs_added
             record["references_status"] = "done" if refs_ok else "failed"
@@ -522,6 +524,7 @@ def expand_all_seeds(db, resume: bool = True, reset_state: bool = False):
 
         # Forward expansion
         if record.get("citations_status") != "done":
+            db.commit()
             cits_added, cits_ok = expand_seed_citations(db, paper_id, s2_id)
             total_cits += cits_added
             record["citations_status"] = "done" if cits_ok else "failed"
@@ -562,6 +565,7 @@ def main():
         seeds = db.get_seed_papers()
         for s in seeds:
             if not s.get("semantic_scholar_id"):
+                db.commit()
                 s2 = s2_lookup_paper(s["paper_id"])
                 if s2:
                     db.update_paper_field(s["paper_id"], "semantic_scholar_id", s2.get("paperId", ""))

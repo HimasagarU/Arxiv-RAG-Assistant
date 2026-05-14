@@ -151,6 +151,84 @@ SEED_PAPERS = [
         "layer": "latest",
         "year": 2024,
     },
+    {
+        "paper_id": "2209.10652",
+        "title": "Toy Models of Superposition",
+        "layer": "core",
+        "year": 2022,
+    },
+    {
+        "paper_id": "2408.05451",
+        "title": "Mathematical Models of Computation in Superposition",
+        "layer": "latest",
+        "year": 2024,
+    },
+    {
+        "paper_id": "2303.14151",
+        "title": "Double Descent Demystified: Identifying, Interpreting & Comparing Superposition",
+        "layer": "core",
+        "year": 2023,
+    },
+    {
+        "paper_id": "2410.13928",
+        "title": "Automatically Interpreting Millions of Features in Large Language Models",
+        "layer": "latest",
+        "year": 2024,
+    },
+    {
+        "paper_id": "2411.10397",
+        "title": "Features that Make a Difference: Leveraging Gradients for Improved Dictionary Learning",
+        "layer": "latest",
+        "year": 2024,
+    },
+    {
+        "paper_id": "2412.06410",
+        "title": "BatchTopK Sparse Autoencoders",
+        "layer": "latest",
+        "year": 2024,
+    },
+    {
+        "paper_id": "2502.17332",
+        "title": "Tokenized SAEs: Disentangling SAE Reconstructions",
+        "layer": "latest",
+        "year": 2025,
+    },
+    {
+        "paper_id": "2503.17547",
+        "title": "Learning Multi-Level Features with Matryoshka Sparse Autoencoders",
+        "layer": "latest",
+        "year": 2025,
+    },
+    {
+        "paper_id": "2304.05969",
+        "title": "Localizing Model Behavior with Path Patching",
+        "layer": "core",
+        "year": 2023,
+    },
+    {
+        "paper_id": "2309.16042",
+        "title": "Towards Best Practices of Activation Patching in Language Models: Metrics and Methods",
+        "layer": "core",
+        "year": 2023,
+    },
+    {
+        "paper_id": "2404.15255",
+        "title": "How to use and interpret activation patching",
+        "layer": "latest",
+        "year": 2024,
+    },
+    {
+        "paper_id": "2409.10559",
+        "title": "Unveiling Induction Heads: Provable Training Dynamics and Feature Learning in Transformers",
+        "layer": "latest",
+        "year": 2024,
+    },
+    {
+        "paper_id": "2405.07987",
+        "title": "The Platonic Representation Hypothesis",
+        "layer": "latest",
+        "year": 2024,
+    },
 ]
 
 
@@ -570,10 +648,15 @@ def ingest_seed_papers(db):
     log.info(f"Seed ingestion complete. Corpus: {db.count_papers()} papers")
 
 
-def ingest_keyword_papers(db, max_pages: int = 20, batch_size: int = 100):
+def ingest_keyword_papers(
+    db,
+    max_pages: int = 20,
+    batch_size: int = 100,
+    query_override: Optional[str] = None,
+):
     """Ingest papers from arXiv via keyword queries (gap-filling mode)."""
     log.info("Starting keyword-based ingestion...")
-    query = f"({build_keyword_query()}) AND (cat:cs.LG OR cat:cs.CL)"
+    query = query_override or f"({build_keyword_query()}) AND (cat:cs.LG OR cat:cs.CL)"
     total_added = 0
     valid = 0
     invalid = 0
@@ -751,6 +834,7 @@ def main():
     )
     parser.add_argument("--pdf-timeout", type=int, default=60, help="PDF download timeout (seconds)")
     parser.add_argument("--max-pages", type=int, default=20, help="Max pages for keyword search")
+    parser.add_argument("--query", type=str, default=None, help="Override the keyword query string")
     parser.add_argument("--enrich-limit", type=int, default=0, help="Max papers to enrich (0=all)")
     parser.add_argument("--reset-keyword-state", action="store_true", help="Clear saved keyword-ingestion resume state")
     parser.add_argument("--retry-failed", action="store_true", help="Retry papers whose download or parse status previously failed")
@@ -768,7 +852,7 @@ def main():
         ingest_seed_papers(db)
 
     if args.mode in ("keyword", "all"):
-        ingest_keyword_papers(db, max_pages=args.max_pages)
+        ingest_keyword_papers(db, max_pages=args.max_pages, query_override=args.query)
 
     if args.mode in ("enrich", "all"):
         enrich_full_text(

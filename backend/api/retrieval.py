@@ -1,13 +1,15 @@
 """
-retrieval.py — Text-only hybrid retrieval with Qdrant Cloud + PostgreSQL FTS.
+retrieval.py — Hybrid retrieval: Qdrant chunk + optional parent–child (arxiv_docs),
+BM25 lexical merge, RRF, rerank, MMR, and context assembly.
 
 Pipeline:
-1. Classify query intent (explanatory, comparative, technical, sota, discovery)
-2. Dense retrieval from the text collection
-3. PostgreSQL full-text retrieval over text chunks
-4. RRF fusion
-5. Cross-encoder reranking
-6. Context compression
+1. Classify query intent
+2. Query decomposition / embedding + optional LLM expansion
+3. Dense retrieval (arxiv_text) + optional parent–child expansion (arxiv_docs → chunks)
+4. Lexical retrieval (BM25 artifacts + Qdrant payload recovery)
+5. Intent-aware RRF fusion + optional citation-graph boost
+6. Cross-encoder reranking, section/recency boosts, MMR, diversity
+7. Context compression (caller)
 """
 
 import logging
@@ -15,22 +17,27 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import datetime, timedelta
 from typing import Optional
-from uuid import uuid5, NAMESPACE_URL
 
-import numpy as np
-from dotenv import load_dotenv
-import torch
-from sentence_transformers import SentenceTransformer
 import joblib
 import json
+import numpy as np
+import torch
+from dotenv import load_dotenv
 from pathlib import Path
-
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, SearchParams
+from qdrant_client.models import Filter, FieldCondition, MatchValue, MatchText, SearchParams, MatchAny
+from sentence_transformers import SentenceTransformer
+
+from utils.ids import chunk_id_to_uuid, paper_id_to_uuid
+from utils.metadata_normalize import normalize_published
+from utils.runtime import resolve_embedding_model
+from utils.section_labels import normalize_section_label
 
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from api.feature_flags import env_bool, env_tri
 from rerank.reranker import Reranker
 
 load_dotenv()
@@ -51,12 +58,16 @@ INTENT_SOTA = "sota"
 INTENT_COMPARATIVE = "comparative"
 INTENT_TECHNICAL = "technical"
 INTENT_DISCOVERY = "discovery"
+INTENT_EVIDENCE = "evidence"
+GENERATION_CONTEXT_TOP_N = int(os.getenv("GENERATION_CONTEXT_TOP_N", "10"))
 
 _INTENT_RULES = [
     (re.compile(r"\b(what\s+is|what\s+are|how\s+does|how\s+do|explain|define|describe|overview\s+of|introduction\s+to|basics\s+of|concept\s+of|meaning\s+of|tell\s+me\s+about)\b", re.I), INTENT_EXPLANATORY),
+    (re.compile(r"\b(summarize|summarise|summary|main\s+contributions?|key\s+contributions?|novel\s+contributions?|takeaways?|what\s+is\s+this\s+(paper|document)\s+about|overview\s+of\s+this\s+(paper|document)|summarize\s+this\s+(paper|document))\b", re.I), INTENT_EXPLANATORY),
     (re.compile(r"\b(compare|vs\.?|versus|difference\s+between|compared\s+to|similarities|pros\s+and\s+cons|advantages\s+over|trade.?offs?)\b", re.I), INTENT_COMPARATIVE),
     (re.compile(r"\b(latest|newest|recent|state.of.the.art|sota|cutting.edge|current\s+trends?|advances?\s+in|progress\s+in|2024|2025|2026)\b", re.I), INTENT_SOTA),
     (re.compile(r"\b(derive|proof|prove|formal\s+definition|theorem|lemma|mathematical|equation\s+for|algorithm\s+for|pseudocode|formula)\b", re.I), INTENT_TECHNICAL),
+    (re.compile(r"\b(evidence|empirical|ablation|results\s+show|causal|demonstrate|support|proof|indicates)\b", re.I), INTENT_EVIDENCE),
 ]
 
 
@@ -70,15 +81,153 @@ def classify_query_intent(query: str) -> str:
     return INTENT_DISCOVERY
 
 
+def query_expansion_gate(query: str, intent: Optional[str] = None) -> dict:
+    """When True, skip aggressive expansion to avoid drifting exact / technical lookups."""
+    q = (query or "").strip()
+    gate = {
+        "restrict_decompose": False,
+        "restrict_embedding_expansion": False,
+        "restrict_llm_expansion": False,
+    }
+    
+    if intent in (INTENT_TECHNICAL, INTENT_COMPARATIVE, INTENT_EVIDENCE):
+        gate["restrict_embedding_expansion"] = True
+        gate["restrict_llm_expansion"] = True
+
+    if not q:
+        return gate
+    ql = q.lower()
+    if re.search(r"\b(?:arxiv:)?\d{4}\.\d{4,5}\b", ql):
+        gate["restrict_embedding_expansion"] = True
+        gate["restrict_llm_expansion"] = True
+        gate["restrict_decompose"] = True
+    if q.count('"') >= 2:
+        gate["restrict_llm_expansion"] = True
+    if len(re.findall(r"\$[^$]{2,}\$", q)) >= 2 or "\\begin{" in q or "_{}" in q:
+        gate["restrict_embedding_expansion"] = True
+        gate["restrict_llm_expansion"] = True
+    if re.search(r"\b(?:eq\.?|equation)\s*\d+", ql):
+        gate["restrict_embedding_expansion"] = True
+    return gate
+
+
+def retrieval_skip_dense() -> bool:
+    return env_bool("RETRIEVAL_SKIP_DENSE", False)
+
+
+def retrieval_skip_lexical() -> bool:
+    return env_bool("RETRIEVAL_SKIP_LEXICAL", False)
+
+
+def retrieval_skip_parent_child() -> bool:
+    return env_bool("RETRIEVAL_SKIP_PARENT_CHILD", False)
+
+
+def retrieval_skip_rerank() -> bool:
+    return env_bool("RETRIEVAL_SKIP_RERANK", False)
+
+
+def retrieval_skip_mmr() -> bool:
+    return env_bool("RETRIEVAL_SKIP_MMR", False)
+
+
+def retrieval_skip_boosts() -> bool:
+    return env_bool("RETRIEVAL_SKIP_BOOSTS", False)
+
+
+def normalize_chunk_metadata(meta: dict) -> dict:
+    """Ensure section labels are canonical for boosts and UI."""
+    if not meta:
+        return meta
+    out = dict(meta)
+    out["section_hint"] = normalize_section_label(out.get("section_hint", "other"))
+    return out
+
+
+def is_document_summary_query(query: str) -> bool:
+    return bool(re.search(
+        r"\b(summarize|summarise|summary|main\s+contributions?|key\s+contributions?|novel\s+contributions?|takeaways?|abstract|introduction|conclusion|what\s+is\s+this\s+(paper|document)\s+about|overview\s+of\s+this\s+(paper|document)|summarize\s+this\s+(paper|document))\b",
+        query,
+        re.I,
+    ))
+
+
+def decompose_query(query: str, intent: str = INTENT_DISCOVERY, paper_scoped: bool = False) -> list[str]:
+    """Generate a small set of retrieval-oriented subqueries to improve recall."""
+    q = " ".join((query or "").strip().split())
+    if not q:
+        return []
+
+    variants = [q]
+
+    if intent == INTENT_EXPLANATORY:
+        variants.extend([
+            f"{q} definition",
+            f"{q} mechanism",
+            f"{q} intuition",
+        ])
+
+    if intent == INTENT_EVIDENCE:
+        variants.extend([
+            f"{q} ablation evidence",
+            f"{q} empirical evidence",
+            f"{q} causal evidence",
+            f"{q} results",
+        ])
+
+    if intent == INTENT_TECHNICAL:
+        variants.extend([
+            f"{q} equation",
+            f"{q} algorithm",
+            f"{q} implementation",
+            f"{q} formal definition",
+        ])
+
+    if is_document_summary_query(q):
+        variants.extend([
+            f"{q} abstract",
+            f"{q} introduction",
+            f"{q} conclusion",
+            "main contributions",
+        ])
+
+    if intent == INTENT_COMPARATIVE and " vs " in q.lower():
+        left, right = re.split(r"\bvs\.?\b|\bversus\b", q, maxsplit=1, flags=re.I)
+        for part in (left.strip(), right.strip()):
+            if part:
+                variants.append(part)
+
+    if paper_scoped:
+        variants.append(f"{q} in this paper")
+
+    deduped = []
+    seen = set()
+    for variant in variants:
+        normalized = variant.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        deduped.append(variant)
+        if len(deduped) >= 5:
+            break
+    return deduped
+
+
 # ---------------------------------------------------------------------------
 # Collection names
 # ---------------------------------------------------------------------------
 
 COLLECTION_TEXT = "arxiv_text"
-ALL_COLLECTIONS = [COLLECTION_TEXT]
+COLLECTION_DOCS = "arxiv_docs"
+ALL_COLLECTIONS = [COLLECTION_TEXT, COLLECTION_DOCS]
+
+# Parent–child retrieval (arxiv_docs → arxiv_text)
+PARENT_TOP_DOCS = int(os.getenv("PARENT_TOP_DOCS", "20"))
+PARENT_CHUNKS_PER_DOC = int(os.getenv("PARENT_CHUNKS_PER_DOC", "10"))
 
 # Max chunks per paper in final output (diversity control)
-MAX_CHUNKS_PER_PAPER = int(os.getenv("MAX_CHUNKS_PER_PAPER", "2"))
+MAX_CHUNKS_PER_PAPER = int(os.getenv("MAX_CHUNKS_PER_PAPER", "4"))
+MMR_LAMBDA = float(os.getenv("MMR_LAMBDA", "0.5"))
 
 # Qdrant search ef (higher = better recall at query time)
 QDRANT_SEARCH_EF = 200
@@ -88,8 +237,90 @@ INTENT_RRF_WEIGHTS = {
     INTENT_EXPLANATORY: (0.7, 0.3),   # concept queries favor dense
     INTENT_COMPARATIVE: (0.6, 0.4),
     INTENT_TECHNICAL:   (0.5, 0.5),   # balanced for equations/formulas
+    INTENT_EVIDENCE:    (0.55, 0.45), # evidence balanced
     INTENT_SOTA:        (0.7, 0.3),
     INTENT_DISCOVERY:   (0.4, 0.6),   # keyword-heavy queries favor FTS
+}
+
+# Intent-tuned retrieval pool sizes, MMR, and fusion merge breadth
+INTENT_RETRIEVAL_PARAMS = {
+    INTENT_EXPLANATORY: {
+        "k_dense": 80,
+        "k_lex": 60,
+        "merge_top_m": 80,
+        "rerank_top": 50,
+        "mmr_lambda": 0.65,
+        "mmr_enabled": True,
+        "recency_calendar": False,
+    },
+    INTENT_COMPARATIVE: {
+        "k_dense": 70,
+        "k_lex": 70,
+        "merge_top_m": 70,
+        "rerank_top": 50,
+        "mmr_lambda": 0.7,
+        "mmr_enabled": True,
+        "recency_calendar": False,
+    },
+    INTENT_TECHNICAL: {
+        "k_dense": 80,
+        "k_lex": 80,
+        "merge_top_m": 60,
+        "rerank_top": 60,
+        "mmr_lambda": 0.8,
+        "mmr_enabled": True,
+        "recency_calendar": False,
+    },
+    INTENT_EVIDENCE: {
+        "k_dense": 50,
+        "k_lex": 50,
+        "merge_top_m": 50,
+        "rerank_top": 50,
+        "mmr_lambda": 0.8,
+        "mmr_enabled": True,
+        "recency_calendar": False,
+    },
+    INTENT_SOTA: {
+        "k_dense": 80,
+        "k_lex": 60,
+        "merge_top_m": 90,
+        "rerank_top": 50,
+        "mmr_lambda": 0.6,
+        "mmr_enabled": True,
+        "recency_calendar": True,
+        "recency_boost": 1.25,
+    },
+    INTENT_DISCOVERY: {
+        "k_dense": 60,
+        "k_lex": 80,
+        "merge_top_m": 150,
+        "rerank_top": 50,
+        "mmr_lambda": 0.5,
+        "mmr_enabled": True,
+        "recency_calendar": False,
+    },
+}
+
+SECTION_BASE_WEIGHT = {
+    "abstract": 1.15,
+    "introduction": 1.12,
+    "related_work": 0.94,
+    "background": 0.9,
+    "method": 1.18,
+    "experiments": 1.12,
+    "results": 1.12,
+    "discussion": 1.05,
+    "conclusion": 1.1,
+    "appendix": 0.82,
+    "other": 1.0,
+}
+
+INTENT_SECTION_PREF = {
+    INTENT_EXPLANATORY: {"abstract": 1.35, "introduction": 1.28, "background": 1.12},
+    INTENT_TECHNICAL: {"method": 1.32, "experiments": 1.18, "results": 1.12, "related_work": 0.5, "appendix": 0.5, "abstract": 0.5},
+    INTENT_EVIDENCE: {"results": 1.35, "experiments": 1.30, "discussion": 1.15, "method": 1.05, "related_work": 0.5, "appendix": 0.5, "abstract": 0.5},
+    INTENT_SOTA: {"results": 1.22, "related_work": 1.12, "conclusion": 1.1},
+    INTENT_COMPARATIVE: {"method": 1.12, "results": 1.12, "discussion": 1.1},
 }
 
 
@@ -100,11 +331,6 @@ def _bm25_tokenize(text: str) -> list[str]:
     so this mirrors the offline builder's simple normalization.
     """
     return re.sub(r"[^\w\s]", "", text.lower()).split()
-
-def chunk_id_to_uuid(chunk_id: str) -> str:
-    """Convert a string chunk_id to a deterministic UUID (must match build_qdrant.py)."""
-    return str(uuid5(NAMESPACE_URL, chunk_id))
-
 
 # ---------------------------------------------------------------------------
 # HybridRetriever
@@ -125,16 +351,17 @@ class HybridRetriever:
         final_top_n: int = 5,
         rrf_k: int = 60,
     ):
-        self.k_dense = k_dense
-        self.k_lex = k_lex
-        self.merge_top_m = merge_top_m
-        self.final_top_n = final_top_n
+        self.k_dense = int(os.getenv("K_DENSE", str(k_dense)))
+        self.k_lex = int(os.getenv("K_LEX", str(k_lex)))
+        self.merge_top_m = int(os.getenv("MERGE_TOP_M", str(merge_top_m)))
+        self.final_top_n = int(os.getenv("FINAL_TOP_N", str(final_top_n)))
         self.rrf_k = int(os.getenv("RRF_K", str(rrf_k)))
+        self.context_top_n = int(os.getenv("GENERATION_CONTEXT_TOP_N", str(GENERATION_CONTEXT_TOP_N)))
 
         qdrant_url = qdrant_url or os.getenv("QDRANT_URL")
         qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
-        embedding_model = embedding_model or os.getenv("EMBEDDING_MODEL", "BAAI/bge-large-en-v1.5")
-        reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        embedding_model = resolve_embedding_model(embedding_model)
+        reranker_model = reranker_model or os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-v2-m3")
 
         log.info("Initializing HybridRetriever (Qdrant text-only)")
 
@@ -150,19 +377,21 @@ class HybridRetriever:
         log.info(f"Connecting to Qdrant Cloud: {qdrant_url}")
         self.qdrant_client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
 
-        # Discover available collection
+        # Discover available collections
         self.collections = {}
+        self._citation_adj_cache: Optional[dict[str, set[str]]] = None
         try:
             all_cols = self.qdrant_client.get_collections().collections
             available = {c.name for c in all_cols}
-            if COLLECTION_TEXT in available:
-                info = self.qdrant_client.get_collection(COLLECTION_TEXT)
-                self.collections[COLLECTION_TEXT] = info.points_count
-                log.info(f"  {COLLECTION_TEXT}: {info.points_count} points")
-            else:
-                log.warning(f"  {COLLECTION_TEXT}: not found (will skip)")
+            for name in (COLLECTION_TEXT, COLLECTION_DOCS):
+                if name in available:
+                    info = self.qdrant_client.get_collection(name)
+                    self.collections[name] = info.points_count
+                    log.info("  %s: %s points", name, info.points_count)
+                else:
+                    log.warning("  %s: not found (will skip)", name)
         except Exception as e:
-            log.error(f"Failed to list Qdrant collections: {e}")
+            log.error("Failed to list Qdrant collections: %s", e)
 
         # Reranker
         self.reranker = Reranker(model_name=reranker_model)
@@ -170,20 +399,38 @@ class HybridRetriever:
         # Artifacts
         data_dir = Path(os.getenv("DATA_DIR", "data"))
         self.bm25 = None
+        self.bm25_dirty = False
         self.chunks_meta = []
         self.chunks_text = {}
+        self.chunks_contextual_text = {}
         self.papers_meta = {}
         
         try:
             with open(data_dir / "papers_meta.json", "r", encoding="utf-8") as f:
-                self.papers_meta = json.load(f)
+                raw_pm = json.load(f)
+                self.papers_meta = {}
+                for pid, rec in raw_pm.items():
+                    if not isinstance(rec, dict):
+                        continue
+                    r2 = dict(rec)
+                    pub = normalize_published(r2.get("published"))
+                    if pub:
+                        r2["published"] = pub
+                    self.papers_meta[pid] = r2
             log.info(f"Loaded {len(self.papers_meta)} papers from papers_meta.json")
         except Exception as e:
             log.warning(f"Could not load papers_meta.json: {e}")
             
         try:
             with open(data_dir / "chunks_meta.jsonl", "r", encoding="utf-8") as f:
-                self.chunks_meta = [json.loads(line) for line in f]
+                self.chunks_meta = []
+                for line in f:
+                    if not line.strip():
+                        continue
+                    o = json.loads(line)
+                    if isinstance(o, dict) and "section_hint" in o:
+                        o["section_hint"] = normalize_section_label(o.get("section_hint", "other"))
+                    self.chunks_meta.append(o)
             log.info(f"Loaded {len(self.chunks_meta)} chunk metadata entries.")
         except Exception as e:
             log.warning(f"Could not load chunks_meta.jsonl: {e}")
@@ -193,17 +440,24 @@ class HybridRetriever:
             log.info("BM25 index loaded successfully.")
         except Exception as e:
             log.warning(f"Could not load bm25_v1.pkl: {e}")
-            
-        try:
-            with open(data_dir / "chunks_text.jsonl", "r", encoding="utf-8") as f:
-                for line in f:
-                    entry = json.loads(line)
-                    self.chunks_text[entry["chunk_id"]] = entry.get("text", "")
-            log.info(f"Loaded texts for {len(self.chunks_text)} chunks.")
-        except Exception as e:
-            log.warning(f"Could not load chunks_text.jsonl: {e}")
 
-        log.info("HybridRetriever ready.")
+        if os.getenv("LEXICAL_LOAD_CHUNKS_TEXT", "").lower() in ("1", "true", "yes"):
+            try:
+                path = data_dir / "chunks_text.jsonl"
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        o = json.loads(line)
+                        cid = o.get("chunk_id")
+                        if cid:
+                            self.chunks_text[cid] = o.get("text", "")
+                            self.chunks_contextual_text[cid] = o.get("contextual_text", o.get("text", ""))
+                log.info("Loaded %s chunk text fallbacks from chunks_text.jsonl", len(self.chunks_text))
+            except Exception as e:
+                log.warning("Could not load chunks_text.jsonl: %s", e)
+            
+        log.info("HybridRetriever ready (Memory-Optimized: Text will be fetched from Qdrant).")
 
     def add_paper(self, paper_meta: dict, chunks: list[dict]):
         """Dynamically add a new paper to the in-memory retriever structures."""
@@ -213,12 +467,11 @@ class HybridRetriever:
         self.papers_meta[paper_id] = {
             "title": paper_meta.get("title", ""),
             "authors": paper_meta.get("authors", ""),
-            "published": paper_meta.get("published", ""),
+            "published": normalize_published(paper_meta.get("published")) or "",
             "categories": paper_meta.get("categories", "")
         }
         
         # 2. Update chunks meta and text
-        new_tokens_list = []
         for chunk in chunks:
             chunk_id = chunk["chunk_id"]
             self.chunks_meta.append({
@@ -228,39 +481,18 @@ class HybridRetriever:
                 "authors": chunk.get("authors", ""),
                 "categories": chunk.get("categories", ""),
                 "chunk_type": chunk.get("chunk_type", "text"),
-                "section_hint": chunk.get("section_hint", "other"),
+                "section_hint": normalize_section_label(chunk.get("section_hint", "other")),
                 "layer": chunk.get("layer", "core"),
                 "token_count": chunk.get("token_count", 0),
                 "chunk_index": chunk.get("chunk_index", 0),
                 "total_chunks": chunk.get("total_chunks", 1),
                 "chunk_source": chunk.get("chunk_source", "full_text")
             })
-            self.chunks_text[chunk_id] = chunk["chunk_text"]
             
-            # Tokenize for BM25
-            tokenizer = getattr(self.bm25, "tokenizer", None) if self.bm25 else None
-            if callable(tokenizer):
-                tokens = tokenizer(chunk["chunk_text"])
-            else:
-                tokens = _bm25_tokenize(chunk["chunk_text"])
-                new_tokens_list.append(tokens)
-        
-        # 3. Dynamically update BM25 index (approximate)
-        if self.bm25 and new_tokens_list:
-            for tokens in new_tokens_list:
-                freqs = {}
-                for t in tokens:
-                    freqs[t] = freqs.get(t, 0) + 1
-                self.bm25.doc_freqs.append(freqs)
-                self.bm25.doc_len.append(len(tokens))
-                self.bm25.corpus_size += 1
-                
-                # Assign average IDF to completely unseen terms
-                for t in freqs:
-                    if t not in self.bm25.idf:
-                        self.bm25.idf[t] = getattr(self.bm25, 'average_idf', 0.0)
-            
-            self.bm25.avgdl = sum(self.bm25.doc_len) / max(1, self.bm25.corpus_size)
+        # 3. BM25 incremental updates are not supported.
+        if self.bm25:
+            self.bm25_dirty = True
+            log.warning("BM25 artifacts are now stale; rebuild BM25 to index new papers.")
 
         # 4. Persist to local artifact files to survive restarts
         try:
@@ -281,7 +513,7 @@ class HybridRetriever:
                         "authors": chunk.get("authors", ""),
                         "categories": chunk.get("categories", ""),
                         "chunk_type": chunk.get("chunk_type", "text"),
-                        "section_hint": chunk.get("section_hint", "other"),
+                        "section_hint": normalize_section_label(chunk.get("section_hint", "other")),
                         "layer": chunk.get("layer", "core"),
                         "token_count": chunk.get("token_count", 0),
                         "chunk_index": chunk.get("chunk_index", 0),
@@ -289,15 +521,6 @@ class HybridRetriever:
                         "chunk_source": chunk.get("chunk_source", "full_text")
                     }
                     f.write(json.dumps(meta_entry) + "\n")
-                    
-            # Append to chunks_text.jsonl
-            with open(data_dir / "chunks_text.jsonl", "a", encoding="utf-8") as f:
-                for chunk in chunks:
-                    text_entry = {
-                        "chunk_id": chunk["chunk_id"],
-                        "text": chunk["chunk_text"]
-                    }
-                    f.write(json.dumps(text_entry) + "\n")
                     
             log.info(f"Successfully persisted metadata for {paper_id} to disk.")
         except Exception as e:
@@ -311,6 +534,17 @@ class HybridRetriever:
         """Encode query for BGE model (no prefix needed)."""
         emb = self.embed_model.encode([query], batch_size=1, convert_to_numpy=True, normalize_embeddings=True)
         return emb[0].tolist()
+
+    def _combine_candidate_lists(self, candidate_lists: list[list[dict]], score_key: str) -> list[dict]:
+        """Merge repeated results from multiple query variants, keeping the best score."""
+        merged = {}
+        for candidates in candidate_lists:
+            for candidate in candidates:
+                cid = candidate["chunk_id"]
+                existing = merged.get(cid)
+                if existing is None or candidate.get(score_key, 0.0) > existing.get(score_key, 0.0):
+                    merged[cid] = candidate
+        return sorted(merged.values(), key=lambda x: x.get(score_key, 0.0), reverse=True)
 
     def _build_qdrant_filter(self, category: Optional[str] = None,
                              author: Optional[str] = None,
@@ -372,7 +606,8 @@ class HybridRetriever:
             candidates.append({
                 "chunk_id": payload.get("chunk_id", str(point.id)),
                 "chunk_text": payload.get("chunk_text", ""),
-                "metadata": {
+                "retrieval_text": payload.get("contextual_text", payload.get("chunk_text", "")),
+                "metadata": normalize_chunk_metadata({
                     "paper_id": payload.get("paper_id", ""),
                     "title": payload.get("title", ""),
                     "authors": payload.get("authors", ""),
@@ -385,18 +620,292 @@ class HybridRetriever:
                     "chunk_index": payload.get("chunk_index", 0),
                     "total_chunks": payload.get("total_chunks", 1),
                     "chunk_source": payload.get("chunk_source", "full_text"),
-                },
+                }),
                 "dense_score": point.score,
                 "source": "dense",
                 "collection": collection_name,
             })
         return candidates
 
-    def _dense_retrieve(self, query: str, qdrant_filter: Optional[Filter] = None) -> list[dict]:
-        query_emb = self._encode_query(query)
-        return self._dense_retrieve_collection(
-            COLLECTION_TEXT, query_emb, self.k_dense, qdrant_filter
-        )
+    def _dense_retrieve(
+        self,
+        query: str,
+        qdrant_filter: Optional[Filter] = None,
+        query_variants: Optional[list[str]] = None,
+        auxiliary_dense_strings: Optional[list[str]] = None,
+    ) -> list[dict]:
+        lists: list[list[dict]] = []
+        for extra in auxiliary_dense_strings or []:
+            s = (extra or "").strip()
+            if not s:
+                continue
+            lists.append(
+                self._dense_retrieve_collection(
+                    COLLECTION_TEXT, self._encode_query(s), self.k_dense, qdrant_filter
+                )
+            )
+        variants = query_variants or [query]
+        for variant in variants:
+            query_emb = self._encode_query(variant)
+            lists.append(
+                self._dense_retrieve_collection(COLLECTION_TEXT, query_emb, self.k_dense, qdrant_filter)
+            )
+        merged = self._combine_candidate_lists(lists, "dense_score")
+        return merged[: max(self.k_dense * 3, 1)]
+
+    def _embedding_query_expansion(self, query: str, max_variants: int = 4) -> list[str]:
+        """Lightweight semantic expansion using nearby chunk texts (no extra LLM)."""
+        if COLLECTION_TEXT not in self.collections:
+            return []
+        try:
+            emb = self._encode_query(query)
+            res = self.qdrant_client.query_points(
+                collection_name=COLLECTION_TEXT,
+                query=emb,
+                limit=8,
+                with_payload=True,
+            )
+        except Exception as exc:
+            log.debug("Embedding query expansion skipped: %s", exc)
+            return []
+
+        phrases: set[str] = set()
+        phrase_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[a-z][a-z]+){0,3}\b")
+        for pt in res.points or []:
+            text = (pt.payload or {}).get("chunk_text", "") or ""
+            for m in phrase_re.findall(text[:1200]):
+                if len(m) > 5 and m.lower() not in query.lower():
+                    phrases.add(m.strip())
+                if len(phrases) >= 12:
+                    break
+            if len(phrases) >= 12:
+                break
+
+        out: list[str] = []
+        for p in list(phrases)[:max_variants]:
+            out.append(f"{query} {p}")
+        return out
+
+    def _fetch_chunk_payloads_from_qdrant(self, chunk_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch Qdrant payloads for lexical candidates; fill missing via scroll."""
+        out: dict[str, dict] = {}
+        if not chunk_ids or COLLECTION_TEXT not in self.collections:
+            return out
+
+        batch_size = 48
+        for start in range(0, len(chunk_ids), batch_size):
+            batch_ids = chunk_ids[start : start + batch_size]
+            uuids = [chunk_id_to_uuid(cid) for cid in batch_ids]
+            try:
+                points = self.qdrant_client.retrieve(
+                    collection_name=COLLECTION_TEXT,
+                    ids=uuids,
+                    with_payload=True,
+                )
+            except Exception as exc:
+                log.warning("Qdrant retrieve batch failed: %s", exc)
+                points = []
+
+            for p in points or []:
+                pl = p.payload or {}
+                cid = pl.get("chunk_id")
+                if cid:
+                    out[cid] = pl
+
+        missing = [cid for cid in chunk_ids if cid not in out]
+        if not missing:
+            return out
+
+        try:
+            flt = Filter(
+                must=[FieldCondition(key="chunk_id", match=MatchAny(any=missing[:96]))]
+            )
+            scroll_res, _ = self.qdrant_client.scroll(
+                collection_name=COLLECTION_TEXT,
+                scroll_filter=flt,
+                with_payload=True,
+                limit=min(256, max(len(missing) * 2, 32)),
+            )
+            for p in scroll_res or []:
+                pl = p.payload or {}
+                cid = pl.get("chunk_id")
+                if cid and cid not in out:
+                    out[cid] = pl
+        except Exception as exc:
+            log.debug("Qdrant scroll fallback for chunk payloads failed: %s", exc)
+
+        return out
+
+    def _parent_child_enabled(self) -> bool:
+        """Parent–child path uses arxiv_docs; ENABLE_PARENT_CHILD unset=auto (on if collection exists)."""
+        if retrieval_skip_parent_child():
+            return False
+        mode = env_tri("ENABLE_PARENT_CHILD")
+        has_docs = COLLECTION_DOCS in self.collections
+        if mode == "off":
+            return False
+        if mode == "on":
+            if not has_docs:
+                log.warning("ENABLE_PARENT_CHILD=true but collection %s missing", COLLECTION_DOCS)
+            return has_docs
+        return has_docs
+
+    def _chunk_candidate_from_point(self, point, dense_score: float, source_tag: str) -> dict:
+        payload = point.payload or {}
+        return {
+            "chunk_id": payload.get("chunk_id", str(point.id)),
+            "chunk_text": payload.get("chunk_text", ""),
+            "retrieval_text": payload.get("contextual_text", payload.get("chunk_text", "")),
+            "metadata": normalize_chunk_metadata({
+                "paper_id": payload.get("paper_id", ""),
+                "title": payload.get("title", ""),
+                "authors": payload.get("authors", ""),
+                "categories": payload.get("categories", ""),
+                "chunk_type": payload.get("chunk_type", "text"),
+                "modality": payload.get("modality", "text"),
+                "section_hint": payload.get("section_hint", "other"),
+                "layer": payload.get("layer", "core"),
+                "token_count": payload.get("token_count", 0),
+                "chunk_index": payload.get("chunk_index", 0),
+                "total_chunks": payload.get("total_chunks", 1),
+                "chunk_source": payload.get("chunk_source", "full_text"),
+            }),
+            "dense_score": float(dense_score),
+            "source": source_tag,
+            "collection": COLLECTION_TEXT,
+        }
+
+    def _parent_child_chunk_candidates(
+        self,
+        query_embedding: list[float],
+        qdrant_filter: Optional[Filter],
+        paper_scope: Optional[str],
+    ) -> tuple[list[dict], dict]:
+        """Retrieve top papers in arxiv_docs, then pull their best chunks from arxiv_text."""
+        trace: dict = {"active": False, "top_docs": [], "chunks_added": 0}
+        if not self._parent_child_enabled() or paper_scope:
+            return [], trace
+
+        trace["active"] = True
+        try:
+            doc_res = self.qdrant_client.query_points(
+                collection_name=COLLECTION_DOCS,
+                query=query_embedding,
+                query_filter=qdrant_filter,
+                limit=PARENT_TOP_DOCS,
+                search_params=SearchParams(hnsw_ef=QDRANT_SEARCH_EF),
+                with_payload=True,
+            )
+        except Exception as exc:
+            log.warning("Parent doc retrieval failed: %s", exc)
+            return [], trace
+
+        docs = doc_res.points or []
+        if not docs:
+            return [], trace
+
+        out: list[dict] = []
+        for d in docs:
+            pl = d.payload or {}
+            pid = pl.get("paper_id", "")
+            if not pid:
+                continue
+            trace["top_docs"].append({"paper_id": pid, "doc_score": round(float(d.score or 0.0), 5)})
+
+            must = [FieldCondition(key="paper_id", match=MatchValue(value=pid))]
+            if qdrant_filter and qdrant_filter.must:
+                must.extend(qdrant_filter.must)
+            paper_flt = Filter(must=must)
+
+            try:
+                ch_res = self.qdrant_client.query_points(
+                    collection_name=COLLECTION_TEXT,
+                    query=query_embedding,
+                    query_filter=paper_flt,
+                    limit=PARENT_CHUNKS_PER_DOC,
+                    search_params=SearchParams(hnsw_ef=QDRANT_SEARCH_EF),
+                    with_payload=True,
+                )
+            except Exception as exc:
+                log.debug("Parent chunk expand failed for %s: %s", pid, exc)
+                continue
+
+            doc_score = float(d.score or 0.0)
+            for pt in ch_res.points or []:
+                ch = float(pt.score or 0.0)
+                combined = max(1e-6, doc_score) * max(1e-6, ch)
+                out.append(
+                    self._chunk_candidate_from_point(
+                        pt,
+                        dense_score=combined,
+                        source_tag="dense_parent",
+                    )
+                )
+
+        trace["chunks_added"] = len(out)
+        return out, trace
+
+    def _load_citation_adjacency(self) -> dict[str, set[str]]:
+        if not env_bool("ENABLE_CITATION_BOOST", False):
+            return {}
+        if self._citation_adj_cache is not None:
+            return self._citation_adj_cache
+        self._citation_adj_cache = {}
+        try:
+            from db.database import get_db
+
+            db = get_db()
+            db.run_migrations()
+            with db.conn.cursor() as cur:
+                cur.execute(
+                    "SELECT source_paper_id, target_paper_id FROM citation_edges LIMIT 500000"
+                )
+                for row in cur.fetchall():
+                    a, b = row["source_paper_id"], row["target_paper_id"]
+                    self._citation_adj_cache.setdefault(a, set()).add(b)
+                    self._citation_adj_cache.setdefault(b, set()).add(a)
+            log.info("Loaded citation adjacency: %s nodes", len(self._citation_adj_cache))
+        except Exception as exc:
+            log.warning("Could not load citation_edges: %s", exc)
+            self._citation_adj_cache = {}
+        return self._citation_adj_cache
+
+    def _apply_citation_graph_boost(self, candidates: list[dict], trace: dict, intent: str = INTENT_DISCOVERY) -> list[dict]:
+        if not env_bool("ENABLE_CITATION_BOOST", False) or not candidates:
+            trace["citation_boost"] = {"enabled": False}
+            return candidates
+        if intent in (INTENT_TECHNICAL, INTENT_EVIDENCE, INTENT_EXPLANATORY):
+            trace["citation_boost"] = {"enabled": False, "reason": "bypassed_for_intent"}
+            return candidates
+
+        adj = self._load_citation_adjacency()
+        if not adj:
+            trace["citation_boost"] = {"enabled": True, "applied": False, "reason": "empty_graph"}
+            return candidates
+
+        top = sorted(candidates, key=lambda x: x.get("fusion_score", 0.0), reverse=True)[:25]
+        seeds: set[str] = set()
+        for c in top:
+            pid = c.get("metadata", {}).get("paper_id", "")
+            if pid:
+                seeds.add(pid)
+        neighbors: set[str] = set()
+        for s in seeds:
+            neighbors |= adj.get(s, set())
+
+        boosted = 0
+        for c in candidates:
+            pid = c.get("metadata", {}).get("paper_id", "")
+            if pid and pid in neighbors and pid not in seeds:
+                c["fusion_score"] = float(c.get("fusion_score", 0.0)) + 0.004
+                boosted += 1
+        candidates.sort(key=lambda x: x.get("fusion_score", 0.0), reverse=True)
+        trace["citation_boost"] = {
+            "enabled": True,
+            "boosted_candidates": boosted,
+            "seed_papers": len(seeds),
+        }
+        return candidates
 
     # ------------------------------------------------------------------
     # Lexical retrieval (PostgreSQL FTS)
@@ -408,30 +917,32 @@ class HybridRetriever:
         category: Optional[str] = None,
         author: Optional[str] = None,
         start_year: Optional[int] = None,
+        query_variants: Optional[list[str]] = None,
     ) -> list[dict]:
         if not self.bm25 or not self.chunks_meta:
             return []
-            
-        tokens = re.sub(r'[^\w\s]', '', query.lower()).split()
-        if not tokens:
-            return []
-            
-        scores = self.bm25.get_scores(tokens)
-        
-        # Fast top-K selection
-        k = min(self.k_lex * 5, len(scores))
+
+        variants = query_variants or [query]
+        score_accumulator = np.zeros(len(self.chunks_meta), dtype=float)
+        for variant in variants:
+            tokens = re.sub(r'[^\w\s]', '', variant.lower()).split()
+            if not tokens:
+                continue
+            score_accumulator = np.maximum(score_accumulator, self.bm25.get_scores(tokens))
+
+        k = min(self.k_lex * 5, len(score_accumulator))
         if k == 0:
             return []
-        top_indices = np.argpartition(scores, -k)[-k:]
-        top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
+        top_indices = np.argpartition(score_accumulator, -k)[-k:]
+        top_indices = top_indices[np.argsort(score_accumulator[top_indices])[::-1]]
 
         candidates = []
         for idx in top_indices:
-            if scores[idx] <= 0:
+            if score_accumulator[idx] <= 0:
                 continue
             meta = self.chunks_meta[idx]
             paper_id = meta.get("paper_id", "")
-            
+
             if category and category.lower() not in meta.get("categories", "").lower():
                 continue
             if author and author.lower() not in meta.get("authors", "").lower():
@@ -441,14 +952,15 @@ class HybridRetriever:
                 published = paper_info.get("published")
                 if not published or int(published.split("-")[0]) < start_year:
                     continue
-                    
+
             chunk_id = meta["chunk_id"]
             candidates.append({
                 "chunk_id": chunk_id,
-                "chunk_text": self.chunks_text.get(chunk_id, ""),
-                "lex_score": float(scores[idx]),
+                "chunk_text": "", # Will be fetched from Qdrant below
+                "retrieval_text": "",
+                "lex_score": float(score_accumulator[idx]),
                 "chunk_type": meta.get("chunk_type", "text"),
-                "metadata": {
+                "metadata": normalize_chunk_metadata({
                     "paper_id": paper_id,
                     "title": meta.get("title", ""),
                     "authors": meta.get("authors", ""),
@@ -456,12 +968,25 @@ class HybridRetriever:
                     "section_hint": meta.get("section_hint", "other"),
                     "layer": meta.get("layer", "core"),
                     "chunk_source": meta.get("chunk_source", "full_text"),
-                },
+                }),
                 "source": "lexical",
             })
-            if len(candidates) >= self.k_lex:
+            if len(candidates) >= self.k_lex * 3:
                 break
-                
+
+        if candidates:
+            payload_map = self._fetch_chunk_payloads_from_qdrant([c["chunk_id"] for c in candidates])
+            for c in candidates:
+                payload = payload_map.get(c["chunk_id"])
+                if payload:
+                    c["chunk_text"] = payload.get("chunk_text", "")
+                    c["retrieval_text"] = payload.get("contextual_text", c["chunk_text"])
+                elif c["chunk_id"] in self.chunks_text:
+                    c["chunk_text"] = self.chunks_text.get(c["chunk_id"], "")
+                    c["retrieval_text"] = self.chunks_contextual_text.get(
+                        c["chunk_id"], c["chunk_text"]
+                    )
+
         return candidates
 
     # ------------------------------------------------------------------
@@ -480,6 +1005,7 @@ class HybridRetriever:
             merged[c["chunk_id"]] = {
                 "chunk_id": c["chunk_id"],
                 "chunk_text": c.get("chunk_text", ""),
+                "retrieval_text": c.get("retrieval_text", c.get("chunk_text", "")),
                 "metadata": c.get("metadata", {}),
                 "dense_score_raw": c["dense_score"],
                 "lex_score_raw": 0.0,
@@ -494,10 +1020,13 @@ class HybridRetriever:
                     merged[cid]["sources"].append("lexical")
                 if not merged[cid].get("chunk_text"):
                     merged[cid]["chunk_text"] = c.get("chunk_text", "")
+                if not merged[cid].get("retrieval_text"):
+                    merged[cid]["retrieval_text"] = c.get("retrieval_text", c.get("chunk_text", ""))
             else:
                 merged[cid] = {
                     "chunk_id": cid,
                     "chunk_text": c.get("chunk_text", ""),
+                    "retrieval_text": c.get("retrieval_text", c.get("chunk_text", "")),
                     "metadata": c.get("metadata", {}),
                     "dense_score_raw": 0.0,
                     "lex_score_raw": c["lex_score"],
@@ -576,6 +1105,74 @@ class HybridRetriever:
                 pruned.append(c)
         return pruned
 
+    def _boost_document_summary_sections(self, query: str, candidates: list[dict]) -> list[dict]:
+        """Prefer abstract/introduction/conclusion chunks for paper-scoped summary queries."""
+        if not candidates or not is_document_summary_query(query):
+            return candidates
+
+        boosted = []
+        for candidate in candidates:
+            meta = candidate.get("metadata", {})
+            section = (meta.get("section_hint", "other") or "other").lower()
+            boost = 0.0
+            if section == "abstract":
+                boost = 0.030
+            elif section == "introduction":
+                boost = 0.025
+            elif section == "conclusion":
+                boost = 0.020
+            elif section in {"background", "method", "results"}:
+                boost = 0.010
+
+            candidate["fusion_score"] = candidate.get("fusion_score", 0.0) + boost
+            boosted.append(candidate)
+
+        boosted.sort(key=lambda x: x.get("fusion_score", 0.0), reverse=True)
+        return boosted
+
+    def _diversify_candidates(self, candidates: list[dict], target_n: int, paper_scoped: bool = False) -> list[dict]:
+        """Greedy diversity filter so final context covers multiple sections/evidence types."""
+        if len(candidates) <= target_n:
+            return candidates
+
+        selected = []
+        seen_sections = set()
+        paper_counts = {}
+
+        for candidate in candidates:
+            meta = candidate.get("metadata", {})
+            section = meta.get("section_hint", "other")
+            paper_id = meta.get("paper_id", "")
+            current_count = paper_counts.get(paper_id, 0)
+            paper_limit = 6 if paper_scoped else MAX_CHUNKS_PER_PAPER
+
+            if current_count >= paper_limit:
+                continue
+
+            if section not in seen_sections or len(selected) < min(target_n, 6):
+                selected.append(candidate)
+                seen_sections.add(section)
+                if paper_id:
+                    paper_counts[paper_id] = current_count + 1
+            if len(selected) >= target_n:
+                return selected
+
+        for candidate in candidates:
+            if candidate["chunk_id"] in {x["chunk_id"] for x in selected}:
+                continue
+            meta = candidate.get("metadata", {})
+            paper_id = meta.get("paper_id", "")
+            current_count = paper_counts.get(paper_id, 0)
+            paper_limit = 6 if paper_scoped else MAX_CHUNKS_PER_PAPER
+            if current_count >= paper_limit:
+                continue
+            selected.append(candidate)
+            if paper_id:
+                paper_counts[paper_id] = current_count + 1
+            if len(selected) >= target_n:
+                break
+        return selected
+
     # ------------------------------------------------------------------
     # Paper-level diversity: max N chunks per paper
     # ------------------------------------------------------------------
@@ -651,37 +1248,174 @@ class HybridRetriever:
             "total_unique_papers": len({c.get("metadata", {}).get("paper_id", "") for c in candidates}),
         }
 
+    def _candidate_vectors_for_mmr(self, candidates: list[dict]) -> list[tuple[dict, np.ndarray]]:
+        """Return (candidate, normalized vector) pairs for chunks that have Qdrant vectors."""
+        if COLLECTION_TEXT not in self.collections or not candidates:
+            return []
+        out: list[tuple[dict, np.ndarray]] = []
+        batch_size = 32
+        for start in range(0, len(candidates), batch_size):
+            batch = candidates[start : start + batch_size]
+            uuids = [chunk_id_to_uuid(c["chunk_id"]) for c in batch]
+            try:
+                pts = self.qdrant_client.retrieve(
+                    collection_name=COLLECTION_TEXT,
+                    ids=uuids,
+                    with_vectors=True,
+                    with_payload=True,
+                )
+            except Exception:
+                pts = []
+            pmap = {p.payload.get("chunk_id"): p for p in pts or [] if p.payload}
+            for c in batch:
+                pt = pmap.get(c["chunk_id"])
+                if pt and pt.vector is not None:
+                    v = np.asarray(pt.vector, dtype=np.float32)
+                    n = float(np.linalg.norm(v)) + 1e-9
+                    out.append((c, v / n))
+        return out
+
+    def _apply_mmr(
+        self,
+        candidates: list[dict],
+        *,
+        lambda_param: float,
+        top_k: int,
+    ) -> list[dict]:
+        """Maximal marginal relevance on top reranked candidates using Qdrant vectors."""
+        if not candidates:
+            return []
+        if len(candidates) <= top_k:
+            return candidates
+
+        ordered = sorted(
+            candidates,
+            key=lambda x: x.get("rerank_score", 0.0),
+            reverse=True,
+        )
+        pairs = self._candidate_vectors_for_mmr(ordered[: min(len(ordered), top_k * 4)])
+        if len(pairs) < 2:
+            return ordered[:top_k]
+
+        pairs.sort(key=lambda x: x[0].get("rerank_score", 0.0), reverse=True)
+        cands = [p[0] for p in pairs]
+        emb = np.stack([p[1] for p in pairs], axis=0)
+        rel = np.array([float(c.get("rerank_score", 0.5)) for c in cands], dtype=np.float32)
+        if rel.max() > rel.min():
+            rel = (rel - rel.min()) / (rel.max() - rel.min() + 1e-9)
+        else:
+            rel = np.ones_like(rel)
+
+        selected = [0]
+        selected_set = {0}
+        while len(selected) < top_k:
+            best_j = -1
+            best_mmr = -1e9
+            for j in range(len(cands)):
+                if j in selected_set:
+                    continue
+                sims = emb[j] @ emb[selected].T
+                max_sim = float(np.max(sims))
+                mmr = float(lambda_param * rel[j] - (1.0 - lambda_param) * max_sim)
+                if mmr > best_mmr:
+                    best_mmr = mmr
+                    best_j = j
+            if best_j < 0:
+                break
+            selected.append(best_j)
+            selected_set.add(best_j)
+
+        picked = [cands[j] for j in selected[:top_k]]
+        if len(picked) < top_k:
+            for c in ordered:
+                if c["chunk_id"] in {x["chunk_id"] for x in picked}:
+                    continue
+                picked.append(c)
+                if len(picked) >= top_k:
+                    break
+        return picked[:top_k]
+
+    def _apply_section_rerank_boost(self, candidates: list[dict], intent: str) -> list[dict]:
+        pref = INTENT_SECTION_PREF.get(intent, {})
+        for c in candidates:
+            section = (c.get("metadata", {}).get("section_hint", "other") or "other").lower()
+            base = SECTION_BASE_WEIGHT.get(section, 1.0)
+            extra = pref.get(section, 1.0)
+            boost = base * extra
+            c["rerank_score"] = float(c.get("rerank_score", 0.0)) * boost
+            c["section_boost"] = boost
+        candidates.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+        return candidates
+
+    def _apply_recency_calendar_boost(
+        self,
+        candidates: list[dict],
+        *,
+        boost: float,
+        months: int = 18,
+    ) -> list[dict]:
+        cutoff = datetime.now() - timedelta(days=months * 30)
+
+        for c in candidates:
+            pid = c.get("metadata", {}).get("paper_id", "")
+            pub_raw = (self.papers_meta.get(pid) or {}).get("published")
+            if not pub_raw:
+                continue
+            try:
+                y = int(str(pub_raw)[:4])
+                m = int(str(pub_raw)[5:7]) if len(str(pub_raw)) >= 7 else 1
+                d = int(str(pub_raw)[8:10]) if len(str(pub_raw)) >= 10 else 1
+                pub_dt = datetime(y, m, d)
+            except Exception:
+                continue
+            if pub_dt >= cutoff:
+                c["rerank_score"] = float(c.get("rerank_score", 0.0)) * boost
+                c["recency_boosted"] = True
+        candidates.sort(key=lambda x: x.get("rerank_score", 0.0), reverse=True)
+        return candidates
+
     # ------------------------------------------------------------------
     # Context compression
     # ------------------------------------------------------------------
 
     def compress_context(self, query: str, passages: list[dict],
                          max_sentences: int = 25, intent: str = INTENT_DISCOVERY) -> str:
-        if intent == INTENT_EXPLANATORY:
-            parts = []
-            for i, p in enumerate(passages, 1):
-                title = p.get("title", p.get("metadata", {}).get("title", ""))
-                text = p.get("chunk_text", "")
-                if text:
-                    header = f"[Source {i}: {title}]" if title else f"[Source {i}]"
-                    parts.append(f"{header}\n{text}")
-            return "\n\n".join(parts)
-
-        return " ".join(p.get("chunk_text", "") for p in passages if p.get("chunk_text"))
+        parts = []
+        for i, p in enumerate(passages, 1):
+            title = p.get("title", p.get("metadata", {}).get("title", ""))
+            text = p.get("chunk_text", "")
+            section = p.get("section_hint", p.get("metadata", {}).get("section_hint", "other"))
+            if text:
+                header_bits = [f"Source {i}"]
+                if title:
+                    header_bits.append(title)
+                if section:
+                    header_bits.append(f"section={section}")
+                header = " | ".join(header_bits)
+                parts.append(f"[{header}]\n{text}")
+        return "\n\n".join(parts)
 
     # ------------------------------------------------------------------
     # Main retrieval pipeline
     # ------------------------------------------------------------------
 
-    def retrieve(self, query: str, top_n: int = None,
-                 category: Optional[str] = None, author: Optional[str] = None,
-                 start_year: Optional[int] = None, intent: Optional[str] = None,
-                 paper_id: Optional[str] = None) -> dict:
+    def retrieve(
+        self,
+        query: str,
+        top_n: int = None,
+        category: Optional[str] = None,
+        author: Optional[str] = None,
+        start_year: Optional[int] = None,
+        intent: Optional[str] = None,
+        paper_id: Optional[str] = None,
+        dense_auxiliary_text: Optional[str] = None,
+    ) -> dict:
         """Main retrieval pipeline.
-        
+
         Args:
             paper_id: If set, restricts retrieval to chunks from this paper only
                       (used by document-scoped chat).
+            dense_auxiliary_text: Optional HyDE-style passage; dense retrieval also encodes this string.
         """
         top_n = top_n or self.final_top_n
         intent = intent or classify_query_intent(query)
@@ -689,99 +1423,224 @@ class HybridRetriever:
         trace = {"intent": intent, "paper_scoped": is_paper_scoped}
         t0 = time.time()
 
-        is_explanatory = (intent == INTENT_EXPLANATORY)
-        qdrant_filter = self._build_qdrant_filter(
-            category=category, author=author, paper_id=paper_id
-        )
+        params = INTENT_RETRIEVAL_PARAMS.get(intent, INTENT_RETRIEVAL_PARAMS[INTENT_DISCOVERY])
+        trace["retrieval_params"] = {k: v for k, v in params.items() if k != "mmr_lambda"}
 
-        # Dense retrieval (multi-collection via Qdrant)
-        t1 = time.time()
-        dense_candidates = self._dense_retrieve(query, qdrant_filter)
-        trace["dense_ms"] = round((time.time() - t1) * 1000, 1)
-        trace["dense_count"] = len(dense_candidates)
+        saved_dense, saved_lex, saved_merge = self.k_dense, self.k_lex, self.merge_top_m
+        self.k_dense = int(params["k_dense"])
+        self.k_lex = int(params["k_lex"])
+        self.merge_top_m = max(int(params["merge_top_m"]), saved_merge)
 
-        # Lexical retrieval — filter by paper_id if scoped
-        t2 = time.time()
-        lex_candidates = self._lexical_retrieve(
-            query,
-            category=category,
-            author=author,
-            start_year=start_year,
-        )
-        # Post-filter BM25 results by paper_id for document-scoped chat
-        if paper_id and lex_candidates:
-            lex_candidates = [
-                c for c in lex_candidates
-                if c.get("metadata", {}).get("paper_id") == paper_id
-            ]
-        trace["lex_ms"] = round((time.time() - t2) * 1000, 1)
-        trace["lex_count"] = len(lex_candidates)
+        try:
+            gate = query_expansion_gate(query, intent)
+            trace["expansion_gate"] = gate
+            trace["ablations"] = {
+                "skip_dense": retrieval_skip_dense(),
+                "skip_lexical": retrieval_skip_lexical(),
+                "skip_parent_child": retrieval_skip_parent_child(),
+                "skip_rerank": retrieval_skip_rerank(),
+                "skip_mmr": retrieval_skip_mmr(),
+                "skip_boosts": retrieval_skip_boosts(),
+            }
 
-        # Merge + RRF + modality boost
-        orig_merge = self.merge_top_m
-        if is_explanatory:
-            self.merge_top_m = 40  # Wider pool for explanatory queries
-        t3 = time.time()
-        merged = self._merge_and_normalize(dense_candidates, lex_candidates, intent)
-        trace["merge_ms"] = round((time.time() - t3) * 1000, 1)
-        trace["merged_count"] = len(merged)
-        self.merge_top_m = orig_merge
+            if gate["restrict_decompose"]:
+                qs = " ".join((query or "").strip().split())
+                query_variants = [qs] if qs else []
+            else:
+                query_variants = decompose_query(query, intent=intent, paper_scoped=is_paper_scoped)
 
-        # Skip corpus-wide balancing for paper-scoped retrieval
-        if not is_paper_scoped:
-            # Recency / layer boost (skip for explanatory)
-            if not is_explanatory:
-                merged = self._apply_recency_boost(merged)
-                merged.sort(key=lambda x: x["fusion_score"], reverse=True)
+            if intent in (INTENT_COMPARATIVE, INTENT_TECHNICAL, INTENT_SOTA) and not gate["restrict_embedding_expansion"]:
+                extra = self._embedding_query_expansion(query)
+                merged_v = []
+                seen = set()
+                for v in query_variants + extra:
+                    key = v.lower().strip()
+                    if key not in seen:
+                        seen.add(key)
+                        merged_v.append(v)
+                    if len(merged_v) >= 8:
+                        break
+                query_variants = merged_v
+            trace["query_variants"] = query_variants
 
-            merged = self._filter_candidates_by_year(merged, start_year)
+            if not gate["restrict_llm_expansion"]:
+                try:
+                    from api.app import expand_query_variants_llm
 
-            # Semantic pruning for explanatory
+                    llm_vars = expand_query_variants_llm(query, max_variants=3)
+                    if llm_vars:
+                        seen = {v.lower().strip() for v in query_variants}
+                        for v in llm_vars:
+                            k = v.lower().strip()
+                            if k not in seen:
+                                seen.add(k)
+                                query_variants.append(v)
+                            if len(query_variants) >= 8:
+                                break
+                        trace["query_variants"] = query_variants
+                except Exception as exc:
+                    log.debug("LLM query expansion skipped: %s", exc)
+
+            is_explanatory = intent == INTENT_EXPLANATORY
+            qdrant_filter = self._build_qdrant_filter(
+                category=category, author=author, paper_id=paper_id
+            )
+
+            aux = [dense_auxiliary_text] if (dense_auxiliary_text or "").strip() else None
+
+            t1 = time.time()
+            dense_candidates = []
+            if not retrieval_skip_dense():
+                dense_candidates = self._dense_retrieve(
+                    query, qdrant_filter, query_variants=query_variants, auxiliary_dense_strings=aux
+                )
+            q_emb = self._encode_query(query)
+            pc_chunks, pc_trace = [], {"active": False, "skipped": retrieval_skip_parent_child()}
+            if not retrieval_skip_parent_child():
+                pc_chunks, pc_trace = self._parent_child_chunk_candidates(
+                    q_emb, qdrant_filter, paper_id
+                )
+            trace["parent_child"] = pc_trace
+            if pc_chunks:
+                if retrieval_skip_dense() and not dense_candidates:
+                    dense_candidates = pc_chunks[: max(self.k_dense * 5, 200)]
+                elif dense_candidates:
+                    dense_candidates = self._combine_candidate_lists(
+                        [dense_candidates, pc_chunks],
+                        "dense_score",
+                    )[: max(self.k_dense * 5, 200)]
+            trace["dense_ms"] = round((time.time() - t1) * 1000, 1)
+            trace["dense_count"] = len(dense_candidates)
+
+            t2 = time.time()
+            if retrieval_skip_lexical():
+                lex_candidates = []
+            else:
+                lex_candidates = self._lexical_retrieve(
+                    query,
+                    category=category,
+                    author=author,
+                    start_year=start_year,
+                    query_variants=query_variants,
+                )
+            if paper_id and lex_candidates:
+                lex_candidates = [
+                    c for c in lex_candidates
+                    if c.get("metadata", {}).get("paper_id") == paper_id
+                ]
+            trace["lex_ms"] = round((time.time() - t2) * 1000, 1)
+            trace["lex_count"] = len(lex_candidates)
+
+            merge_floor = max(int(params["merge_top_m"]), 120)
+            self.merge_top_m = max(self.merge_top_m, merge_floor)
             if is_explanatory:
-                merged = self._semantic_pruning(query, merged)
+                self.merge_top_m = max(self.merge_top_m, 160)
 
-            # Paper-level diversity: deduplicate BEFORE reranking
-            merged = self._enforce_paper_diversity(merged, max_per_paper=MAX_CHUNKS_PER_PAPER)
+            t3 = time.time()
+            merged = self._merge_and_normalize(dense_candidates, lex_candidates, intent)
+            merged = self._apply_citation_graph_boost(merged, trace, intent)
+            if is_paper_scoped:
+                merged = self._boost_document_summary_sections(query, merged)
+            trace["merge_ms"] = round((time.time() - t3) * 1000, 1)
+            trace["merged_count"] = len(merged)
 
-        trace["diverse_count"] = len(merged)
+            if not is_paper_scoped:
+                if not is_explanatory:
+                    merged = self._apply_recency_boost(merged)
+                    merged.sort(key=lambda x: x["fusion_score"], reverse=True)
 
-        # Rerank
-        t4 = time.time()
-        rerank_mode = "combined" if is_explanatory else "default"
-        reranked = self.reranker.rerank(query, merged, top_n=top_n, rerank_text_mode=rerank_mode)
-        trace["rerank_ms"] = round((time.time() - t4) * 1000, 1)
+                merged = self._filter_candidates_by_year(merged, start_year)
 
-        # Layer-aware balancing for broad/explanatory queries
-        if is_explanatory:
-            reranked = self._ensure_layer_coverage(reranked, merged)
+                if is_explanatory:
+                    merged = self._semantic_pruning(query, merged)
 
-        analytics = self.extract_analytics(merged)
+                merged = self._enforce_paper_diversity(merged, max_per_paper=MAX_CHUNKS_PER_PAPER)
 
-        # Build output
-        passages = []
-        for p in reranked:
-            meta = p.get("metadata", {})
-            passages.append({
-                "chunk_id": p["chunk_id"],
-                "paper_id": meta.get("paper_id", ""),
-                "title": meta.get("title", ""),
-                "authors": meta.get("authors", ""),
-                "categories": meta.get("categories", ""),
-                "chunk_text": p["chunk_text"],
-                "chunk_type": meta.get("chunk_type", "text"),
-                "modality": meta.get("modality", "text"),
-                "section_hint": meta.get("section_hint", "other"),
-                "layer": meta.get("layer", "core"),
-                "rerank_score": p.get("rerank_score", 0.0),
-                "fusion_score": p.get("fusion_score", 0.0),
-                "sources": p.get("sources", []),
-            })
+            trace["diverse_count"] = len(merged)
 
-        trace["total_ms"] = round((time.time() - t0) * 1000, 1)
-        trace["filters"] = {"category": category, "author": author, "start_year": start_year}
-        trace["unique_papers"] = len({p["paper_id"] for p in passages if p["paper_id"]})
+            rerank_mode = "combined" if is_explanatory else "default"
+            if intent == INTENT_TECHNICAL:
+                rerank_mode = "default"
+            target_n = top_n
+            rerank_cap = min(len(merged), max(target_n * 2, int(params["rerank_top"]) + 8))
 
-        return {"passages": passages, "trace": trace, "analytics": analytics}
+            t4 = time.time()
+            if retrieval_skip_rerank():
+                pool = sorted(merged, key=lambda x: x.get("fusion_score", 0.0), reverse=True)[:rerank_cap]
+                reranked = []
+                for row in pool:
+                    row = dict(row)
+                    row["rerank_score"] = float(row.get("fusion_score", 0.0))
+                    reranked.append(row)
+                trace["rerank"] = {"skipped": True, "reason": "RETRIEVAL_SKIP_RERANK"}
+            else:
+                reranked = self.reranker.rerank(
+                    query, merged, top_n=rerank_cap, rerank_text_mode=rerank_mode
+                )
+                trace["rerank"] = dict(getattr(self.reranker, "last_trace", None) or {})
+            trace["rerank_ms"] = round((time.time() - t4) * 1000, 1)
+
+            if not retrieval_skip_boosts():
+                reranked = self._apply_section_rerank_boost(reranked, intent)
+                if params.get("recency_calendar") and intent == INTENT_SOTA:
+                    reranked = self._apply_recency_calendar_boost(
+                        reranked,
+                        boost=float(params.get("recency_boost", 1.2)),
+                    )
+            else:
+                trace["boosts"] = {"skipped": True}
+                for c in reranked:
+                    c["rerank_score"] = float(c.get("rerank_score", c.get("fusion_score", 0.0)))
+
+            use_mmr = (
+                env_bool("ENABLE_MMR", True)
+                and params.get("mmr_enabled", True)
+                and not retrieval_skip_mmr()
+            )
+            trace["mmr"] = {"enabled": bool(use_mmr)}
+            if use_mmr:
+                reranked = self._apply_mmr(
+                    reranked,
+                    lambda_param=float(params["mmr_lambda"]),
+                    top_k=target_n,
+                )
+            else:
+                reranked = reranked[:target_n]
+
+            reranked = self._diversify_candidates(reranked, target_n=target_n, paper_scoped=is_paper_scoped)
+
+            if is_explanatory:
+                reranked = self._ensure_layer_coverage(reranked, merged)
+
+            analytics = self.extract_analytics(merged)
+
+            passages = []
+            for p in reranked:
+                meta = normalize_chunk_metadata(p.get("metadata", {}))
+                passages.append({
+                    "chunk_id": p["chunk_id"],
+                    "paper_id": meta.get("paper_id", ""),
+                    "title": meta.get("title", ""),
+                    "authors": meta.get("authors", ""),
+                    "categories": meta.get("categories", ""),
+                    "chunk_text": p["chunk_text"],
+                    "contextual_text": p.get("retrieval_text", p["chunk_text"]),
+                    "chunk_type": meta.get("chunk_type", "text"),
+                    "modality": meta.get("modality", "text"),
+                    "section_hint": meta.get("section_hint", "other"),
+                    "layer": meta.get("layer", "core"),
+                    "rerank_score": p.get("rerank_score", 0.0),
+                    "fusion_score": p.get("fusion_score", 0.0),
+                    "sources": p.get("sources", []),
+                })
+
+            trace["total_ms"] = round((time.time() - t0) * 1000, 1)
+            trace["filters"] = {"category": category, "author": author, "start_year": start_year}
+            trace["unique_papers"] = len({p["paper_id"] for p in passages if p["paper_id"]})
+
+            return {"passages": passages, "trace": trace, "analytics": analytics}
+        finally:
+            self.k_dense, self.k_lex, self.merge_top_m = saved_dense, saved_lex, saved_merge
 
     def retrieve_ids(self, query: str, top_n: int = None) -> list[str]:
         result = self.retrieve(query, top_n=top_n)
@@ -795,26 +1654,27 @@ class HybridRetriever:
         if COLLECTION_TEXT not in self.collections:
             return []
         try:
-            log.info(f"Searching for papers similar to: {paper_id}")
-            # Scroll to get all points for this paper
-            scroll_result = self.qdrant_client.scroll(
-                collection_name=COLLECTION_TEXT,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
-                ),
-                with_vectors=True,
-                with_payload=True,
-                limit=100,
-            )
-            points = scroll_result[0]
-            
-            # Fallback to MatchText if MatchValue returns nothing
-            if not points:
-                log.info(f"MatchValue for paper_id {paper_id} returned no points. Retrying with MatchText...")
+            log.info("Searching for papers similar to: %s", paper_id)
+
+            query_vec: Optional[list[float]] = None
+            if COLLECTION_DOCS in self.collections:
+                try:
+                    doc_pt = self.qdrant_client.retrieve(
+                        collection_name=COLLECTION_DOCS,
+                        ids=[paper_id_to_uuid(paper_id)],
+                        with_vectors=True,
+                        with_payload=True,
+                    )
+                    if doc_pt and doc_pt[0].vector is not None:
+                        query_vec = list(doc_pt[0].vector)
+                except Exception as exc:
+                    log.debug("arxiv_docs lookup failed, falling back to chunk mean: %s", exc)
+
+            if query_vec is None:
                 scroll_result = self.qdrant_client.scroll(
                     collection_name=COLLECTION_TEXT,
                     scroll_filter=Filter(
-                        must=[FieldCondition(key="paper_id", match=MatchText(text=paper_id))]
+                        must=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
                     ),
                     with_vectors=True,
                     with_payload=True,
@@ -822,35 +1682,43 @@ class HybridRetriever:
                 )
                 points = scroll_result[0]
 
-            if not points:
-                log.warning(f"No points found for paper_id {paper_id} in Qdrant.")
-                return []
+                if not points:
+                    log.info("MatchValue for paper_id %s returned no points. Retrying with MatchText...", paper_id)
+                    scroll_result = self.qdrant_client.scroll(
+                        collection_name=COLLECTION_TEXT,
+                        scroll_filter=Filter(
+                            must=[FieldCondition(key="paper_id", match=MatchText(text=paper_id))]
+                        ),
+                        with_vectors=True,
+                        with_payload=True,
+                        limit=100,
+                    )
+                    points = scroll_result[0]
 
-            log.info(f"Found {len(points)} points for paper_id {paper_id}. Computing mean embedding...")
+                if not points:
+                    log.warning("No points found for paper_id %s in Qdrant.", paper_id)
+                    return []
 
-            # Compute mean embedding
-            embeddings = [p.vector for p in points if p.vector is not None]
-            if not embeddings:
-                log.warning(f"Points found for paper_id {paper_id} but none had vectors.")
-                return []
-                
-            embeddings = np.array(embeddings)
-            mean_emb = np.mean(embeddings, axis=0)
-            mean_emb = mean_emb / np.linalg.norm(mean_emb)
+                embeddings = [p.vector for p in points if p.vector is not None]
+                if not embeddings:
+                    log.warning("Points found for paper_id %s but none had vectors.", paper_id)
+                    return []
 
-            # Search for similar
-            log.info(f"Querying Qdrant for similar points (excluding {paper_id})...")
+                arr = np.array(embeddings)
+                mean_emb = np.mean(arr, axis=0)
+                query_vec = (mean_emb / (np.linalg.norm(mean_emb) + 1e-9)).tolist()
+
             res = self.qdrant_client.query_points(
                 collection_name=COLLECTION_TEXT,
-                query=mean_emb.tolist(),
+                query=query_vec,
                 query_filter=Filter(
                     must_not=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
                 ),
                 limit=100,
                 with_payload=True,
             )
-            results = res.points
-            log.info(f"Qdrant returned {len(results)} candidate points.")
+            results = res.points or []
+            log.info("Qdrant returned %s candidate points.", len(results))
 
             seen = {paper_id}
             papers = []
@@ -865,14 +1733,14 @@ class HybridRetriever:
                         "authors": payload.get("authors", ""),
                         "categories": payload.get("categories", ""),
                         "layer": payload.get("layer", ""),
-                        "similarity_score": round(point.score, 4),
+                        "similarity_score": round(float(point.score or 0.0), 4),
                         "chunk_text": (payload.get("chunk_text", "") or "")[:300],
                     })
                     if len(papers) >= top_n:
                         break
-            
-            log.info(f"Found {len(papers)} unique similar papers.")
+
+            log.info("Found %s unique similar papers.", len(papers))
             return papers
         except Exception as e:
-            log.error(f"Similar papers search failed: {e}")
+            log.error("Similar papers search failed: %s", e)
             return []

@@ -21,7 +21,7 @@ from dotenv import load_dotenv
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from db.database import get_db
-from ingest.citation_expander import is_relevant, assign_layer, RELEVANCE_KEYWORDS
+from ingest.citation_expander import is_relevant, assign_layer
 
 load_dotenv()
 
@@ -181,7 +181,7 @@ def fill_gap(db, gap: dict, max_per_gap: int = 500, force_fill: bool = False) ->
 
     log.info(f"Filling gap for {era}: need ~{needed} papers ({year_start}-{year_end})")
     if force_fill:
-        log.info(f"  FORCE-FILL mode active: bypassing strict relevance filters")
+        log.info("  FORCE-FILL mode active: bypassing strict relevance filters")
 
     queries = _build_arxiv_queries_for_era(era)
     fetched = 0
@@ -253,7 +253,7 @@ def fill_gap(db, gap: dict, max_per_gap: int = 500, force_fill: bool = False) ->
 
                 # Check corpus cap
                 if db.count_papers() >= CORPUS_TARGET_MAX:
-                    log.info(f"Corpus cap reached during gap-fill")
+                    log.info("Corpus cap reached during gap-fill")
                     return fetched
 
                 # Build paper dict

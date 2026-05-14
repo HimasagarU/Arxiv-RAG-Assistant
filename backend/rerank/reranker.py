@@ -32,18 +32,20 @@ class Reranker:
 
     def __init__(
         self,
-        model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+        model_name: str = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-electra-base"),
         device: Optional[str] = None,
-        batch_size: int = 16,
+        batch_size: int = int(os.getenv("RERANK_BATCH_SIZE", "32")),
     ):
         self.batch_size = batch_size
         self.model_name = _normalize_hf_model_name(model_name)
         self.device = device
         self.ranker = None
+        self.last_trace: dict = {"loaded": False, "status": "disabled"}
 
         enable_reranker = os.getenv("ENABLE_RERANKER", "true").lower() == "true"
         if not enable_reranker:
             log.info("Reranker is explicitly disabled via ENABLE_RERANKER=false")
+            self.last_trace = {"loaded": False, "status": "disabled", "reason": "ENABLE_RERANKER=false"}
             return
 
         log.info(f"Loading CrossEncoder reranker model: {self.model_name}")
@@ -52,9 +54,11 @@ class Reranker:
             log.info("CrossEncoder loaded. Running warmup...")
             self.ranker.predict([("warmup", "warmup")])
             log.info("Reranker ready.")
+            self.last_trace = {"loaded": True, "status": "ok", "model": self.model_name}
         except Exception as e:
             log.error(f"Failed to load reranker model {self.model_name}: {e}")
             log.warning("System will fall back to fusion scores (no reranking).")
+            self.last_trace = {"loaded": False, "status": "error", "error": str(e), "model": self.model_name}
 
     def rerank(
         self,
@@ -80,17 +84,20 @@ class Reranker:
             Top-N passages sorted by reranker score, with 'rerank_score' added.
         """
         if not passages:
+            self.last_trace = {**getattr(self, "last_trace", {}), "last_call": "empty_passages"}
             return []
             
         if self.ranker is None:
             # Fallback if reranker is disabled or failed to load
             for p in passages[:top_n]:
                 p["rerank_score"] = p.get("fusion_score", 0.0)
+            self.last_trace = {**getattr(self, "last_trace", {}), "last_call": "fusion_fallback", "pool": min(len(passages), top_n)}
             return passages[:top_n]
 
         # Pass more candidates through the reranker than requested (limit drastically if on slow CPU)
-        multiplier = 3 if self.device != "cpu" else 1
-        rerank_pool_size = min(len(passages), top_n * multiplier)
+        multiplier = int(os.getenv("RERANK_POOL_MULTIPLIER", "8"))
+        multiplier = max(1, multiplier if self.device != "cpu" else max(2, multiplier // 2))
+        rerank_pool_size = min(len(passages), max(top_n * multiplier, top_n))
         rerank_pool = passages[:rerank_pool_size]
 
         # Build [query, text] pairs for cross-encoder
@@ -98,11 +105,11 @@ class Reranker:
         for p in rerank_pool:
             if rerank_text_mode == "combined":
                 title = p.get("metadata", {}).get("title", "") or p.get("title", "")
-                text = p.get(text_key, "")
+                text = p.get("retrieval_text", p.get(text_key, ""))
                 combined = f"{title} — {text}" if title else text
                 pairs.append([query, combined])
             else:
-                pairs.append([query, p.get(text_key, "")])
+                pairs.append([query, p.get("retrieval_text", p.get(text_key, ""))])
 
         scores = self.ranker.predict(pairs, batch_size=self.batch_size)
 
@@ -112,4 +119,10 @@ class Reranker:
 
         # Sort pool by reranker score and return top_n
         reranked = sorted(rerank_pool, key=lambda x: x["rerank_score"], reverse=True)
+        self.last_trace = {
+            **getattr(self, "last_trace", {}),
+            "last_call": "cross_encoder",
+            "pool_size": len(rerank_pool),
+            "rerank_text_mode": rerank_text_mode,
+        }
         return reranked[:top_n]

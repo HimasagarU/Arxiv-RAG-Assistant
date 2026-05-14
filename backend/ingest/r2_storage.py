@@ -10,7 +10,6 @@ Usage:
     key = r2.upload_pdf("2301.12345", pdf_bytes)
 """
 
-import io
 import json
 import logging
 import os

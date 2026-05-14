@@ -52,7 +52,7 @@ qdrant:
   collections:
     text: "arxiv_text"
 
-# Lexical retrieval — PostgreSQL FTS (automatic, no separate index needed)
+# Lexical retrieval — BM25 over chunks_text.jsonl / chunks_meta.jsonl artifacts (built by `cli index --target bm25`)
 
 # Retrieval
 retrieval:

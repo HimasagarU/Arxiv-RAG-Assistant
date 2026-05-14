@@ -1,12 +1,23 @@
+import hashlib
+import logging
 import os
 import zipfile
+from pathlib import Path
+
 import boto3
 from botocore.config import Config
-from pathlib import Path
-import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def fetch_and_extract():
     # --- Config from Environment ---
@@ -15,7 +26,7 @@ def fetch_and_extract():
     R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
     R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
     R2_ENDPOINT = os.getenv("R2_ENDPOINT")
-    
+
     ZIP_FILENAME = os.getenv("ARTIFACT_ZIP_NAME", "artifacts_v1.zip")
     SHA256_FILENAME = f"{ZIP_FILENAME}.sha256"
     DEST_DIR = Path(os.getenv("DATA_DIR", "data"))
@@ -38,45 +49,61 @@ def fetch_and_extract():
     )
 
     try:
-        log.info(f"Checking remote checksum {SHA256_FILENAME}...")
-        # Download the sha256 file to memory
+        log.info("Checking remote checksum %s...", SHA256_FILENAME)
         remote_sha_obj = s3_client.get_object(Bucket=R2_BUCKET_NAME, Key=SHA256_FILENAME)
-        remote_sha = remote_sha_obj['Body'].read().decode('utf-8').strip()
-        
-        # Check if local matches
+        remote_sha = remote_sha_obj["Body"].read().decode("utf-8").strip().split()[0]
+
         if local_sha_path.exists():
-            local_sha = local_sha_path.read_text(encoding="utf-8").strip()
-            if local_sha == remote_sha:
+            local_sha = local_sha_path.read_text(encoding="utf-8").strip().split()[0]
+            if local_sha == remote_sha and (DEST_DIR / "bm25_v1.pkl").exists():
                 log.info("Local artifacts match remote checksum. Skipping download.")
                 return
-        
-        log.info(f"Checksum mismatch or missing. Downloading {ZIP_FILENAME} from R2...")
+
+        log.info("Checksum mismatch or missing artifacts. Downloading %s from R2...", ZIP_FILENAME)
         s3_client.download_file(R2_BUCKET_NAME, ZIP_FILENAME, str(local_zip_path))
-        log.info("Download complete. Extracting...")
-        
-        with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
+
+        zip_digest = _sha256_file(local_zip_path)
+        if zip_digest != remote_sha:
+            log.error(
+                "Downloaded zip SHA256 mismatch (expected %s, got %s). Removing zip.",
+                remote_sha[:16],
+                zip_digest[:16],
+            )
+            local_zip_path.unlink(missing_ok=True)
+            raise RuntimeError("Artifact zip failed checksum validation.")
+
+        log.info("Download verified. Extracting to %s ...", DEST_DIR)
+        with zipfile.ZipFile(local_zip_path, "r") as zip_ref:
+            names = zip_ref.namelist()
+            if not names:
+                raise RuntimeError("Artifact zip is empty.")
             zip_ref.extractall(DEST_DIR)
-        
-        # Save the new checksum locally
-        local_sha_path.write_text(remote_sha, encoding="utf-8")
-        
-        log.info(f"Extraction complete. Data ready in {DEST_DIR}/")
-        
-        # Cleanup zip to save space
-        os.remove(local_zip_path)
-    except Exception as e:
-        log.error(f"Data fetch failed: {e}")
-        # If the checksum file doesn't exist on R2, fallback to checking if artifacts exist locally
+
         if not (DEST_DIR / "bm25_v1.pkl").exists():
-            log.info(f"Fallback: trying to download {ZIP_FILENAME} without checksum...")
+            raise RuntimeError("Extraction incomplete: bm25_v1.pkl missing after unzip.")
+
+        local_sha_path.write_text(remote_sha + "\n", encoding="utf-8")
+        log.info("Extraction complete. Data ready in %s/", DEST_DIR)
+
+        local_zip_path.unlink(missing_ok=True)
+    except Exception as e:
+        log.error("Data fetch failed: %s", e)
+        if not (DEST_DIR / "bm25_v1.pkl").exists():
+            log.warning("Fallback: trying to download %s without checksum verification...", ZIP_FILENAME)
             try:
                 s3_client.download_file(R2_BUCKET_NAME, ZIP_FILENAME, str(local_zip_path))
-                with zipfile.ZipFile(local_zip_path, 'r') as zip_ref:
+                with zipfile.ZipFile(local_zip_path, "r") as zip_ref:
+                    names = zip_ref.namelist()
+                    if not names:
+                        raise RuntimeError("Fallback zip empty.")
                     zip_ref.extractall(DEST_DIR)
-                os.remove(local_zip_path)
-                log.info(f"Fallback extraction complete.")
+                if not (DEST_DIR / "bm25_v1.pkl").exists():
+                    raise RuntimeError("Fallback extraction incomplete.")
+                local_zip_path.unlink(missing_ok=True)
+                log.warning("Fallback extraction complete (checksum file missing or mismatch on remote).")
             except Exception as e2:
-                log.error(f"Fallback download failed: {e2}")
+                log.error("Fallback download failed: %s", e2)
+
 
 if __name__ == "__main__":
     fetch_and_extract()

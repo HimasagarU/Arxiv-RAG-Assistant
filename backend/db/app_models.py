@@ -9,13 +9,11 @@ Tables:
 """
 
 import uuid
-from datetime import datetime, timezone
 
 from sqlalchemy import (
     Boolean,
     Column,
     DateTime,
-    Enum,
     ForeignKey,
     Integer,
     String,

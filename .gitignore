@@ -5,7 +5,7 @@ Thumbs.db
 
 # Python
 __pycache__/
-.pytest_cache
+.pytest_cache/
 *.pyc
 *.pyo
 venv/
@@ -13,28 +13,29 @@ venv/
 env/
 .env
 .ipynb_checkpoints/
+.ruff_cache/
 
-# Project Specific
-Implementation_guide.md
-Implementation_Plan.md
-Modification_Plan.md
-COMPLETE_ANALYSIS_AND_FIXES.md
-Metrics_Guide.md
-data/
-data_archive_legacy
-logs/
+# IDE
 .idea/
 .vscode/
+.sixth/
+
+# Data artifacts (built by pipeline, not tracked)
+data/
+logs/
+
+# Build artifacts
 0.8.0
 1.9.0
 
-# Ignore sensitive files
+# Sensitive files
 *.key
 *.pem
 
+# Legacy / one-time artifacts
 arxiv_rag_data_20k.zip
 results/*
-evaluation_plan.md
-upgrade_Plan.md
 artifacts_v1.zip
 *.sha256
+
+walkthrough.md

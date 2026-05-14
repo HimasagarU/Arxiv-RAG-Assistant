@@ -140,11 +140,39 @@ def variant_full_pipeline(retriever, query: str, top_n: int = 10) -> tuple[list[
     )
 
 
+def variant_bm25_only(retriever, query: str, top_n: int = 10) -> tuple[list[str], dict]:
+    """Lexical (BM25) only."""
+    prev_d = os.environ.get("RETRIEVAL_SKIP_DENSE")
+    prev_p = os.environ.get("RETRIEVAL_SKIP_PARENT_CHILD")
+    try:
+        os.environ["RETRIEVAL_SKIP_DENSE"] = "true"
+        os.environ["RETRIEVAL_SKIP_PARENT_CHILD"] = "true"
+        res = retriever.retrieve(query, top_n=top_n)
+        return [p["chunk_id"] for p in res["passages"]], {**res["trace"], "variant": "bm25_only"}
+    finally:
+        if prev_d is None:
+            os.environ.pop("RETRIEVAL_SKIP_DENSE", None)
+        else:
+            os.environ["RETRIEVAL_SKIP_DENSE"] = prev_d
+        if prev_p is None:
+            os.environ.pop("RETRIEVAL_SKIP_PARENT_CHILD", None)
+        else:
+            os.environ["RETRIEVAL_SKIP_PARENT_CHILD"] = prev_p
+
+
+def variant_with_parent_full(retriever, query: str, top_n: int = 10) -> tuple[list[str], dict]:
+    """Full retrieve (respects ENABLE_PARENT_CHILD when arxiv_docs exists)."""
+    res = retriever.retrieve(query, top_n=top_n)
+    return [p["chunk_id"] for p in res["passages"]], {**res["trace"], "variant": "retrieve_full"}
+
+
 VARIANTS = {
     "dense_only": variant_dense_only,
+    "bm25_only": variant_bm25_only,
     "hybrid_rrf": variant_hybrid_rrf,
     "hybrid_reranker": variant_hybrid_reranker,
     "full_pipeline": variant_full_pipeline,
+    "retrieve_full": variant_with_parent_full,
 }
 
 

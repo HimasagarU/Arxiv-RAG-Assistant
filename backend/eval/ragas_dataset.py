@@ -9,7 +9,6 @@ Usage:
 """
 
 import json
-import os
 from pathlib import Path
 
 EVAL_DIR = Path(__file__).resolve().parent
@@ -91,7 +90,7 @@ def generate_dataset():
             f.write(json.dumps(q, ensure_ascii=False) + "\n")
 
     print(f"✅ Generated {len(QUESTIONS)} evaluation questions → {OUTPUT_PATH}")
-    print(f"   Breakdown by intent:")
+    print("   Breakdown by intent:")
     from collections import Counter
     counts = Counter(q["intent"] for q in QUESTIONS)
     for intent, count in sorted(counts.items()):

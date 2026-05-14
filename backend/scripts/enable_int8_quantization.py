@@ -2,6 +2,7 @@ import os
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient, models
 
+
 def main():
     load_dotenv()
 
@@ -9,32 +10,39 @@ def main():
     qdrant_api_key = os.getenv("QDRANT_API_KEY")
 
     if not qdrant_url or not qdrant_api_key:
-        print("Error: QDRANT_URL or QDRANT_API_KEY not found in .env")
+        print("❌ Missing QDRANT_URL or QDRANT_API_KEY in .env")
         return
-
-    print(f"Connecting to Qdrant at {qdrant_url}...")
-    client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
 
     collection_name = "arxiv_text"
 
-    print(f"Enabling Int8 Scalar Quantization on collection '{collection_name}'...")
-    
+    print(f"Connecting to Qdrant: {qdrant_url}")
+
+    client = QdrantClient(
+        url=qdrant_url,
+        api_key=qdrant_api_key,
+        timeout=300,
+    )
+
+    print(f"Enabling INT8 scalar quantization on '{collection_name}'...")
+
     try:
-        # Update the collection to enable Int8 Quantization
         client.update_collection(
             collection_name=collection_name,
             quantization_config=models.ScalarQuantization(
                 scalar=models.ScalarQuantizationConfig(
                     type=models.ScalarType.INT8,
-                    always_ram=True  # Keep the tiny int8 vectors in RAM for ultra-fast speed
+                    always_ram=False,
                 )
             )
         )
-        print("✅ Successfully enabled Int8 Quantization!")
-        print("Qdrant is now running a background job to compress all your existing vectors.")
-        print("You can verify this in the Qdrant Cloud Dashboard -> Collections -> arxiv_text -> Configuration.")
+
+        print("✅ INT8 scalar quantization enabled.")
+        print("Qdrant will now quantize existing vectors in the background.")
+        print("Future uploaded vectors will also be quantized automatically.")
+
     except Exception as e:
         print(f"❌ Failed to enable quantization: {e}")
+
 
 if __name__ == "__main__":
     main()

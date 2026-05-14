@@ -332,8 +332,51 @@ class Database:
 
     def insert_chunks_batch(self, chunks: list[dict]):
         """Insert multiple chunks in a single transaction."""
-        for chunk in chunks:
-            self.insert_chunk(chunk)
+        if not chunks:
+            return
+            
+        sql = """
+            INSERT INTO chunks (
+                chunk_id, paper_id, chunk_type, modality, title, authors, categories, chunk_text,
+                section_hint, page_start, page_end, token_count,
+                chunk_index, total_chunks, chunk_source, layer, artifact_meta
+            ) VALUES (
+                %(chunk_id)s, %(paper_id)s, %(chunk_type)s, %(modality)s, %(title)s, %(authors)s, %(categories)s, %(chunk_text)s,
+                %(section_hint)s, %(page_start)s, %(page_end)s, %(token_count)s,
+                %(chunk_index)s, %(total_chunks)s, %(chunk_source)s, %(layer)s, %(artifact_meta)s
+            )
+            ON CONFLICT (chunk_id) DO UPDATE SET
+                chunk_text   = EXCLUDED.chunk_text,
+                section_hint = EXCLUDED.section_hint,
+                token_count  = EXCLUDED.token_count,
+                layer        = EXCLUDED.layer
+        """
+        
+        params = [
+            {
+                "chunk_id": chunk["chunk_id"],
+                "paper_id": chunk["paper_id"],
+                "chunk_type": chunk.get("chunk_type", "text"),
+                "modality": chunk.get("modality", "text"),
+                "title": chunk.get("title", ""),
+                "authors": chunk.get("authors", ""),
+                "categories": chunk.get("categories", ""),
+                "chunk_text": chunk["chunk_text"],
+                "section_hint": chunk.get("section_hint", "other"),
+                "page_start": chunk.get("page_start"),
+                "page_end": chunk.get("page_end"),
+                "token_count": chunk.get("token_count", 0),
+                "chunk_index": chunk.get("chunk_index", 0),
+                "total_chunks": chunk.get("total_chunks", 1),
+                "chunk_source": chunk.get("chunk_source", "full_text"),
+                "layer": chunk.get("layer", "core"),
+                "artifact_meta": json.dumps(chunk.get("artifact_meta", {})),
+            }
+            for chunk in chunks
+        ]
+        
+        with self.conn.cursor() as cur:
+            cur.executemany(sql, params)
 
     def get_chunks(self, paper_id: str) -> list[dict]:
         with self.conn.cursor() as cur:
@@ -472,6 +515,97 @@ class Database:
             cur.execute("DELETE FROM papers")
         self.conn.commit()
         log.info("All tables truncated.")
+
+    def truncate_chunks_table(self) -> None:
+        """Remove all chunk rows (faster than DELETE for large tables)."""
+        with self.conn.cursor() as cur:
+            cur.execute("TRUNCATE TABLE chunks RESTART IDENTITY CASCADE")
+        self.conn.commit()
+        log.info("Truncated chunks table.")
+
+    def clear_full_text_for_paper_ids(self, paper_ids: list[str]) -> int:
+        """Set full_text empty and parse_status pending for re-extraction from PDFs."""
+        if not paper_ids:
+            return 0
+        with self.conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE papers
+                SET full_text = '', parse_status = 'pending'
+                WHERE paper_id = ANY(%s)
+                """,
+                (paper_ids,),
+            )
+            n = cur.rowcount or 0
+        self.conn.commit()
+        return n
+
+    def neon_metadata_report(self, data_dir: Optional[Path] = None) -> dict:
+        """Summarize Postgres paper/chunk coverage vs optional local artifacts."""
+        base = data_dir or Path(os.getenv("DATA_DIR", "data"))
+        report: dict = {}
+
+        with self.conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) AS cnt FROM papers")
+            report["papers_rows"] = cur.fetchone()["cnt"]
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM chunks")
+            report["chunks_rows"] = cur.fetchone()["cnt"]
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM papers WHERE title IS NULL OR TRIM(title) = ''"
+            )
+            report["papers_missing_title"] = cur.fetchone()["cnt"]
+
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM papers WHERE abstract IS NULL OR TRIM(abstract) = ''"
+            )
+            report["papers_missing_abstract"] = cur.fetchone()["cnt"]
+
+            cur.execute(
+                """
+                SELECT download_status, COUNT(*) AS cnt
+                FROM papers
+                GROUP BY download_status
+                ORDER BY cnt DESC
+                """
+            )
+            report["papers_by_download_status"] = {
+                row["download_status"]: row["cnt"] for row in cur.fetchall()
+            }
+
+            cur.execute(
+                """
+                SELECT parse_status, COUNT(*) AS cnt
+                FROM papers
+                GROUP BY parse_status
+                ORDER BY cnt DESC
+                """
+            )
+            report["papers_by_parse_status"] = {
+                row["parse_status"]: row["cnt"] for row in cur.fetchall()
+            }
+
+        papers_meta = base / "papers_meta.json"
+        chunks_jsonl = base / "chunks.jsonl"
+        if papers_meta.exists():
+            raw = json.loads(papers_meta.read_text(encoding="utf-8"))
+            report["papers_meta_keys"] = len(raw) if isinstance(raw, dict) else 0
+        else:
+            report["papers_meta_keys"] = None
+
+        if chunks_jsonl.exists():
+            n = 0
+            with open(chunks_jsonl, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        n += 1
+            report["chunks_jsonl_lines"] = n
+        else:
+            report["chunks_jsonl_lines"] = None
+
+        report["corpus_health"] = self.get_corpus_health()
+        return report
 
 
 # ---------------------------------------------------------------------------

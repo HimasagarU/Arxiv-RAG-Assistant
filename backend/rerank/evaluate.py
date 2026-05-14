@@ -83,7 +83,14 @@ def ndcg_at_k(retrieved_ids: list[str], relevant_ids: list[str], k: int) -> floa
 # Evaluation runner
 # ---------------------------------------------------------------------------
 
-def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
+def evaluate_retrieval(
+    queries_path: str,
+    retrieval_fn=None,
+    k_values=None,
+    *,
+    intent_buckets: bool = True,
+    doc_level: bool = True,
+):
     """
     Run evaluation on a set of queries.
 
@@ -97,7 +104,7 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
         Dict of aggregated metrics.
     """
     if k_values is None:
-        k_values = [5, 10, 20]
+        k_values = [5, 10, 20, 50]
 
     # Load queries
     queries = []
@@ -109,7 +116,8 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
 
     log.info(f"Loaded {len(queries)} evaluation queries")
 
-    # Run evaluation
+    from api.retrieval import classify_query_intent
+
     results = {f"recall@{k}": [] for k in k_values}
     results.update({f"precision@{k}": [] for k in k_values})
     results.update({f"ndcg@{k}": [] for k in k_values})
@@ -117,11 +125,18 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
     results["dense_ms"] = []
     results["lex_ms"] = []
     results["rerank_ms"] = []
+    results["doc_recall@10"] = []
     per_query = []
+
+    def _paper_from_chunk(cid: str) -> str:
+        if not cid or "_" not in cid:
+            return ""
+        return cid.rsplit("_", 2)[0] if "_text_" in cid else cid.split("_")[0]
 
     for q in queries:
         query_text = q["query"]
         relevant = q.get("relevant_chunk_ids", [])
+        rel_papers = list({ _paper_from_chunk(c) for c in relevant if _paper_from_chunk(c) })
 
         if retrieval_fn:
             start = time.time()
@@ -157,7 +172,13 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
 
         mrr = reciprocal_rank(retrieved, relevant)
         results["mrr"].append(mrr)
+
+        if doc_level and rel_papers:
+            ret_papers = [_paper_from_chunk(c) for c in retrieved[:10]]
+            doc_hits = len(set(ret_papers) & set(rel_papers))
+            results["doc_recall@10"].append(doc_hits / max(len(rel_papers), 1))
         qr["mrr"] = mrr
+        qr["intent"] = classify_query_intent(query_text)
         per_query.append(qr)
 
     # Aggregate
@@ -168,6 +189,18 @@ def evaluate_retrieval(queries_path: str, retrieval_fn=None, k_values=None):
         else:
             aggregated[metric] = 0.0
 
+    if intent_buckets:
+        from collections import defaultdict
+
+        by_intent = defaultdict(list)
+        for row in per_query:
+            by_intent[row.get("intent", "unknown")].append(row)
+        aggregated["intent_buckets"] = {
+            intent: {f"recall@{k}": sum(r[f"recall@{k}"] for r in rows) / len(rows) for k in k_values}
+            for intent, rows in by_intent.items()
+            if rows
+        }
+
     return aggregated, per_query
 
 
@@ -177,8 +210,15 @@ def print_results(aggregated: dict, per_query: list):
     print("RETRIEVAL EVALUATION RESULTS")
     print("=" * 60)
 
+    buckets = aggregated.pop("intent_buckets", None)
     for metric, value in sorted(aggregated.items()):
-        print(f"  {metric:20s}: {value:.4f}")
+        if isinstance(value, (int, float)):
+            print(f"  {metric:20s}: {value:.4f}")
+    if buckets:
+        print("\n  Per-intent recall@10:")
+        for intent, row in sorted(buckets.items()):
+            v = row.get("recall@10", 0.0)
+            print(f"    {intent:16s}: {v:.4f}")
 
     if per_query:
         latencies = [q["latency_ms"] for q in per_query if q["latency_ms"] > 0]
@@ -211,12 +251,32 @@ def main():
                         help="Path to queries JSONL")
     parser.add_argument("--output", type=str, default=None,
                         help="Output JSON path for per-query results")
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="full",
+        choices=["full", "dense_only", "bm25_only", "no_parent", "no_rerank", "no_mmr"],
+        help="Ablation preset (sets RETRIEVAL_SKIP_* env vars for this process).",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.queries):
         log.error(f"Queries file not found: {args.queries}")
         log.info("Create a queries.jsonl file with 'query' and 'relevant_chunk_ids' fields.")
         return
+
+    if args.mode == "dense_only":
+        os.environ["RETRIEVAL_SKIP_LEXICAL"] = "true"
+        os.environ["RETRIEVAL_SKIP_PARENT_CHILD"] = "true"
+    elif args.mode == "bm25_only":
+        os.environ["RETRIEVAL_SKIP_DENSE"] = "true"
+        os.environ["RETRIEVAL_SKIP_PARENT_CHILD"] = "true"
+    elif args.mode == "no_parent":
+        os.environ["RETRIEVAL_SKIP_PARENT_CHILD"] = "true"
+    elif args.mode == "no_rerank":
+        os.environ["RETRIEVAL_SKIP_RERANK"] = "true"
+    elif args.mode == "no_mmr":
+        os.environ["RETRIEVAL_SKIP_MMR"] = "true"
 
     from api.retrieval import HybridRetriever
     
