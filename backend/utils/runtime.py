@@ -1,6 +1,21 @@
 """Runtime configuration helpers."""
 
+import logging
 import os
+
+_log = logging.getLogger(__name__)
+
+
+def get_generation_context_top_n(default: int = 10) -> int:
+    """GENERATION_CONTEXT_TOP_N — shared default for retrieval and generation."""
+    raw = os.getenv("GENERATION_CONTEXT_TOP_N")
+    if raw is None or raw == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        _log.warning("Invalid GENERATION_CONTEXT_TOP_N=%s; using default %s", raw, default)
+        return default
 
 
 def _env_truthy(name: str) -> bool:

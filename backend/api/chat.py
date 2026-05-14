@@ -22,7 +22,6 @@ import json
 import logging
 import os
 import time
-from functools import partial
 from typing import Optional
 from uuid import UUID
 
@@ -47,7 +46,6 @@ from db.app_models import Conversation, Message, User
 load_dotenv()
 
 log = logging.getLogger(__name__)
-GENERATION_CONTEXT_TOP_N = int(os.getenv("GENERATION_CONTEXT_TOP_N", "20"))
 
 router = APIRouter(prefix="/conversations", tags=["Chat"])
 
@@ -305,7 +303,7 @@ async def chat_query_stream(
     )
 
     queue = asyncio.Queue()
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     def on_progress(stage: str):
         loop.call_soon_threadsafe(queue.put_nowait, stage)
@@ -328,6 +326,8 @@ async def chat_query_stream(
     async def event_gen():
         last_ping = time.time()
         try:
+            yield _sse_event("retrieval_start", {"query": body.query, "cached": False})
+
             # 1. Stream Progress Updates
             while True:
                 try:
@@ -379,15 +379,40 @@ async def chat_query_stream(
                 prompt = build_prompt(body.query, compressed, passages, intent=intent)
 
             answer_parts: list[str] = []
-            _STOP = object()
-            it = iter(stream_generate_answer(prompt, intent=intent, surface=generation_surface))
-            while True:
-                piece = await asyncio.to_thread(partial(next, it, _STOP))
-                if piece is _STOP:
-                    break
-                if piece:
-                    answer_parts.append(piece)
-                    yield _sse_event("token", {"content": piece})
+            token_queue: asyncio.Queue = asyncio.Queue()
+            sentinel = object()
+            gen_loop = asyncio.get_running_loop()
+
+            def pump_stream():
+                try:
+                    for piece in stream_generate_answer(
+                        prompt, intent=intent, surface=generation_surface
+                    ):
+                        asyncio.run_coroutine_threadsafe(
+                            token_queue.put(piece), gen_loop
+                        ).result()
+                except Exception as pump_exc:
+                    asyncio.run_coroutine_threadsafe(
+                        token_queue.put(pump_exc), gen_loop
+                    ).result()
+                finally:
+                    asyncio.run_coroutine_threadsafe(
+                        token_queue.put(sentinel), gen_loop
+                    ).result()
+
+            pump_future = gen_loop.run_in_executor(None, pump_stream)
+            try:
+                while True:
+                    piece = await token_queue.get()
+                    if isinstance(piece, Exception):
+                        raise piece
+                    if piece is sentinel:
+                        break
+                    if piece:
+                        answer_parts.append(piece)
+                        yield _sse_event("token", {"content": piece})
+            finally:
+                await pump_future
 
             full_answer = "".join(answer_parts)
             if not full_answer.strip():

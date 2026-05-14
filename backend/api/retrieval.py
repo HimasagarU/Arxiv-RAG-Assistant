@@ -32,7 +32,7 @@ from sentence_transformers import SentenceTransformer
 
 from utils.ids import chunk_id_to_uuid, paper_id_to_uuid
 from utils.metadata_normalize import normalize_published
-from utils.runtime import resolve_embedding_model
+from utils.runtime import get_generation_context_top_n, resolve_embedding_model
 from utils.section_labels import normalize_section_label
 
 import sys
@@ -59,7 +59,7 @@ INTENT_COMPARATIVE = "comparative"
 INTENT_TECHNICAL = "technical"
 INTENT_DISCOVERY = "discovery"
 INTENT_EVIDENCE = "evidence"
-GENERATION_CONTEXT_TOP_N = int(os.getenv("GENERATION_CONTEXT_TOP_N", "10"))
+GENERATION_CONTEXT_TOP_N = get_generation_context_top_n(10)
 
 _INTENT_RULES = [
     (re.compile(r"\b(what\s+is|what\s+are|how\s+does|how\s+do|explain|define|describe|overview\s+of|introduction\s+to|basics\s+of|concept\s+of|meaning\s+of|tell\s+me\s+about)\b", re.I), INTENT_EXPLANATORY),
@@ -356,7 +356,7 @@ class HybridRetriever:
         self.merge_top_m = int(os.getenv("MERGE_TOP_M", str(merge_top_m)))
         self.final_top_n = int(os.getenv("FINAL_TOP_N", str(final_top_n)))
         self.rrf_k = int(os.getenv("RRF_K", str(rrf_k)))
-        self.context_top_n = int(os.getenv("GENERATION_CONTEXT_TOP_N", str(GENERATION_CONTEXT_TOP_N)))
+        self.context_top_n = get_generation_context_top_n(10)
 
         qdrant_url = qdrant_url or os.getenv("QDRANT_URL")
         qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
@@ -908,7 +908,7 @@ class HybridRetriever:
         return candidates
 
     # ------------------------------------------------------------------
-    # Lexical retrieval (PostgreSQL FTS)
+    # Lexical retrieval (BM25 over local artifacts; payloads from Qdrant)
     # ------------------------------------------------------------------
 
     def _lexical_retrieve(
@@ -1380,11 +1380,29 @@ class HybridRetriever:
 
     def compress_context(self, query: str, passages: list[dict],
                          max_sentences: int = 25, intent: str = INTENT_DISCOVERY) -> str:
+        """Assemble passage text for the LLM, capped at ``max_sentences`` total sentences."""
+        _ = (query, intent)  # API stability; reserved for future intent-aware budgets
+        budget = max(1, int(max_sentences))
+        idxs = [i for i, p in enumerate(passages) if (p.get("chunk_text") or "").strip()]
+        n_pass = max(1, len(idxs))
+        base, extra = divmod(budget, n_pass)
+        per_idx: dict[int, int] = {}
+        for j, pi in enumerate(idxs):
+            per_idx[pi] = base + (1 if j < extra else 0)
+
         parts = []
         for i, p in enumerate(passages, 1):
+            text = (p.get("chunk_text") or "").strip()
+            if not text:
+                continue
+            cap = per_idx.get(i - 1, 0)
+            if cap <= 0:
+                continue
             title = p.get("title", p.get("metadata", {}).get("title", ""))
-            text = p.get("chunk_text", "")
             section = p.get("section_hint", p.get("metadata", {}).get("section_hint", "other"))
+            sentences = re.split(r"(?<=[.!?])\s+", text)
+            take = min(len(sentences), cap)
+            text = " ".join(sentences[:take]).strip()
             if text:
                 header_bits = [f"Source {i}"]
                 if title:
@@ -1603,10 +1621,17 @@ class HybridRetriever:
                         reranked,
                         boost=float(params.get("recency_boost", 1.2)),
                     )
+                trace["boosts"] = {"applied": True, "mode": "fusion_scores"}
             else:
-                trace["boosts"] = {"skipped": True}
                 for c in reranked:
                     c["rerank_score"] = float(c.get("rerank_score", c.get("fusion_score", 0.0)))
+                reranked = self._apply_section_rerank_boost(reranked, intent)
+                if params.get("recency_calendar") and intent == INTENT_SOTA:
+                    reranked = self._apply_recency_calendar_boost(
+                        reranked,
+                        boost=float(params.get("recency_boost", 1.2)),
+                    )
+                trace["boosts"] = {"applied": True, "mode": "post_rerank"}
 
             use_mmr = (
                 env_bool("ENABLE_MMR", True)

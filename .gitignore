@@ -39,3 +39,5 @@ artifacts_v1.zip
 *.sha256
 
 walkthrough.md
+docs
+docs/MASTER_GUIDE.md

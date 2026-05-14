@@ -191,7 +191,7 @@ async function _consumeSSEStream(reader, onEvent) {
       break;
     }
 
-    buffer += decoder.decode(value, { stream: false });
+    buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete last line
 

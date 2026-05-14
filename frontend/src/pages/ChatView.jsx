@@ -13,7 +13,7 @@ const MAX_QUERIES = 20;
 const PIPELINE_STEPS = [
   { id: 'Expanding query',                   label: 'Expanding query variants…'           },
   { id: 'Hybrid retrieval',                  label: 'Dense & Lexical retrieval…'          },
-  { id: 'Reranking (Cross-Encoder)',         label: 'BGE-Reranker-Base…'                 },
+  { id: 'Reranking (Cross-Encoder)',         label: 'Cross-encoder reranking…'           },
   { id: 'MMR Diversity Filtering',           label: 'MMR diversity filter…'               },
   { id: 'Context Compression & Synthesis',   label: 'Compressing context…'                },
   { id: 'Synthesizing Answer',               label: 'Generating answer with Groq…'        },

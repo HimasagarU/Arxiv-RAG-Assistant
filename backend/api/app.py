@@ -38,6 +38,8 @@ load_dotenv()
 # Ensure project root is in sys.path so 'db' and 'api' can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from utils.runtime import get_generation_context_top_n
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -76,7 +78,7 @@ def _get_env_int(name: str, default: int) -> int:
         return default
 
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TEMPERATURE = _get_env_float("GEMINI_TEMPERATURE", 0.2)
 GEMINI_MAX_OUTPUT_TOKENS = _get_env_int("GEMINI_MAX_OUTPUT_TOKENS", 8192)
 GEMINI_TOP_P = _get_env_float("GEMINI_TOP_P", 0.9)
@@ -84,9 +86,9 @@ GEMINI_RPM = _get_env_int("GEMINI_RPM", 5)
 GEMINI_RPD = _get_env_int("GEMINI_RPD", 0)
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_TEMPERATURE = _get_env_float("GROQ_TEMPERATURE", GEMINI_TEMPERATURE)
-GROQ_MAX_OUTPUT_TOKENS = _get_env_int("GROQ_MAX_OUTPUT_TOKENS", 4096)
+GROQ_MAX_OUTPUT_TOKENS = _get_env_int("GROQ_MAX_OUTPUT_TOKENS", 8192)
 GROQ_TOP_P = _get_env_float("GROQ_TOP_P", GEMINI_TOP_P)
-GENERATION_CONTEXT_TOP_N = _get_env_int("GENERATION_CONTEXT_TOP_N", 10)
+GENERATION_CONTEXT_TOP_N = get_generation_context_top_n(10)
 
 
 def _error_text(exc: Exception) -> str:
@@ -255,15 +257,19 @@ class GeminiClient:
             contents=prompt,
             config=self._generation_config(system_prompt, temp),
         )
+        blocked_chunks = 0
         for chunk in stream:
             try:
                 text = chunk.text
                 if text:
                     yield text
             except ValueError:
-                # Catch safety or empty text exceptions thrown by the property accessor
-                log.warning("Gemini stream chunk blocked (safety or recitation filter).")
-                pass
+                blocked_chunks += 1
+        if blocked_chunks:
+            log.warning(
+                "Gemini stream omitted %s chunk(s) (safety or recitation filter).",
+                blocked_chunks,
+            )
 
 
 class GroqClient:
@@ -572,10 +578,6 @@ _metrics = {
 # Lifespan
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Lifespan
-# ---------------------------------------------------------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load models and indexes on startup."""
@@ -717,25 +719,25 @@ def build_prompt(query: str, compressed_context: str, passages: list[dict],
                  intent: str = "discovery") -> str:
     """Build a RAG prompt with intent-specific answer templates."""
     sources_block = _build_sources_block(passages)
-    
-    # Detect multiple papers to warn against over-synthesis
+
+    context_for_prompt = compressed_context
     unique_papers = {p.get("paper_id") for p in passages if p.get("paper_id")}
     if len(unique_papers) > 1:
-        synthesis_warning = (
-            "\n\nNOTE: The retrieved context contains evidence from multiple distinct papers. "
+        context_for_prompt = (
+            compressed_context
+            + "\n\nNOTE: The retrieved context contains evidence from multiple distinct papers. "
             "Do NOT merge their theories into one framework. Preserving the distinction between "
             "their respective interpretations is critical."
         )
-        compressed_context += synthesis_warning
 
     if intent == "explanatory":
-        return _build_explanatory_prompt(query, compressed_context, sources_block)
+        return _build_explanatory_prompt(query, context_for_prompt, sources_block)
     elif intent == "comparative":
-        return _build_comparative_prompt(query, compressed_context, sources_block)
+        return _build_comparative_prompt(query, context_for_prompt, sources_block)
     elif intent == "evidence":
-        return _build_evidence_prompt(query, compressed_context, sources_block)
+        return _build_evidence_prompt(query, context_for_prompt, sources_block)
     else:
-        return _build_general_prompt(query, compressed_context, sources_block)
+        return _build_general_prompt(query, context_for_prompt, sources_block)
 
 
 def _build_explanatory_prompt(query: str, context: str, sources: str) -> str:
