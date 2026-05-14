@@ -1408,7 +1408,6 @@ async def query_stream_endpoint(request: QueryRequest):
     target_top_n = min(request.top_k, get_context_size(intent))
     
     import asyncio
-    from concurrent.futures import ThreadPoolExecutor
 
     queue = asyncio.Queue()
     loop = asyncio.get_event_loop()

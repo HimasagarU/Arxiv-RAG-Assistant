@@ -1429,7 +1429,8 @@ class HybridRetriever:
                       (used by document-scoped chat).
             dense_auxiliary_text: Optional HyDE-style passage; dense retrieval also encodes this string.
         """
-        if on_progress: on_progress("Expanding query")
+        if on_progress:
+            on_progress("Expanding query")
         top_n = top_n or self.final_top_n
         intent = intent or classify_query_intent(query)
         is_paper_scoped = paper_id is not None
@@ -1498,7 +1499,8 @@ class HybridRetriever:
             qdrant_filter = self._build_qdrant_filter(
                 category=category, author=author, paper_id=paper_id
             )
-            if on_progress: on_progress("Hybrid retrieval")
+            if on_progress:
+                on_progress("Hybrid retrieval")
 
             aux = [dense_auxiliary_text] if (dense_auxiliary_text or "").strip() else None
 
@@ -1578,7 +1580,7 @@ class HybridRetriever:
             target_n = top_n
             rerank_cap = min(len(merged), max(target_n * 2, int(params["rerank_top"]) + 8))
 
-            t4 = time.time()
+
             if retrieval_skip_rerank():
                 pool = sorted(merged, key=lambda x: x.get("fusion_score", 0.0), reverse=True)[:rerank_cap]
                 reranked = []
@@ -1592,7 +1594,8 @@ class HybridRetriever:
                     query, merged, top_n=rerank_cap, rerank_text_mode=rerank_mode
                 )
                 trace["rerank"] = dict(getattr(self.reranker, "last_trace", None) or {})
-            if on_progress: on_progress("Reranking (Cross-Encoder)")
+            if on_progress:
+                on_progress("Reranking (Cross-Encoder)")
             if retrieval_skip_rerank():
                 reranked = self._apply_section_rerank_boost(reranked, intent)
                 if params.get("recency_calendar") and intent == INTENT_SOTA:
@@ -1612,7 +1615,8 @@ class HybridRetriever:
             )
             trace["mmr"] = {"enabled": bool(use_mmr)}
             if use_mmr:
-                if on_progress: on_progress("MMR Diversity Filtering")
+                if on_progress:
+                    on_progress("MMR Diversity Filtering")
                 reranked = self._apply_mmr(
                     reranked,
                     lambda_param=float(params["mmr_lambda"]),
