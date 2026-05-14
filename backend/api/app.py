@@ -13,6 +13,7 @@ Usage:
 
 import json
 import logging
+from importlib import import_module
 import os
 import re
 import sys
@@ -38,7 +39,7 @@ load_dotenv()
 # Ensure project root is in sys.path so 'db' and 'api' can be imported
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils.runtime import get_generation_context_top_n
+get_generation_context_top_n = import_module("utils.runtime").get_generation_context_top_n
 
 logging.basicConfig(
     level=logging.INFO,
