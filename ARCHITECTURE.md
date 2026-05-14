@@ -9,34 +9,33 @@ This document contains the deep technical specifications, pipeline details, data
 ```mermaid
 flowchart TB
     subgraph Client
-        U[User] --> FE[React / Vite Frontend<br/>Vercel]
+        U[User] --> FE[React SPA\nVercel]
     end
 
-    subgraph Backend ["FastAPI Backend (Docker)"]
+    subgraph Backend ["FastAPI (HF Spaces)"]
         direction TB
-        API[REST API + SSE Streaming]
-        AUTH[JWT Auth<br/>bcrypt + HS256]
-        RET[HybridRetriever<br/>Dense + Lexical + Rerank]
-        CHAT[Conversation Manager<br/>Sliding Window Context]
-        DOC[Document Ingestion<br/>Live Upload Pipeline]
+        API[REST + SSE]
+        AUTH[JWT Auth\nHS256]
+        RET[Retriever\nHybrid+BGE]
+        CHAT[Chat Mgr\nRedis/Neon]
+        DOC[Ingestion\nPyMuPDF]
     end
 
-    subgraph Storage ["Cloud Storage Layer"]
-        QDRANT[(Qdrant Cloud<br/>arxiv_text + arxiv_docs)]
-        NEON[(Neon PostgreSQL<br/>Papers · Citations · Users · Chats)]
-        R2[(Cloudflare R2<br/>BM25 Artifacts ZIP)]
-        REDIS[(Redis Cloud<br/>Session + Query Cache)]
+    subgraph Storage ["Cloud Storage"]
+        QDRANT[(Qdrant\nVectors)]
+        NEON[(Neon PG\nRelational)]
+        R2[(R2 Cloud\nBM25 ZIP)]
+        REDIS[(Redis\nCache)]
     end
 
-    subgraph LLM ["LLM Layer"]
-        GEMINI[Gemini 2.5 Flash<br/>Primary Generation]
-        GROQ[Groq LLaMA 3.3 70B<br/>Fallback + Compression]
+    subgraph LLM ["Inference"]
+        GEMINI[Gemini 2.5\nPrimary]
+        GROQ[Groq 3.3\nFallback]
     end
 
     FE -->|REST + SSE| API
     API --> AUTH & CHAT & DOC & RET
-    RET --> QDRANT & REDIS
-    RET -->|BM25 Artifacts| R2
+    RET --> QDRANT & REDIS & R2
     CHAT --> NEON & REDIS
     AUTH --> NEON & REDIS
     DOC --> QDRANT & NEON
@@ -47,35 +46,18 @@ flowchart TB
 
 ## 2. Offline Ingestion Pipeline
 
-The offline pipeline runs locally to build the full corpus. PDFs are preserved locally; parsed full text is stored in Neon `papers` table; chunks go to **Qdrant** (vector + payload) and **BM25 artifacts** (local files uploaded to R2).
-
 ```mermaid
 flowchart LR
-    subgraph Ingest ["1. Ingest"]
-        SEED[Seed Papers] --> ARXIV[arXiv API]
-        KW[Keyword Queries] --> ARXIV
-        S2[Semantic Scholar] --> ARXIV
-        ARXIV --> NEON_P[(Neon: papers)]
-    end
-
-    subgraph Enrich ["2. Enrich"]
-        NEON_P --> DL[PDF Download]
-        DL --> PARSE[PyMuPDF / pdfplumber]
-        PARSE --> NEON_P
-    end
-
-    subgraph Chunk ["3. Chunk"]
-        NEON_P --> CHUNK[Section-Sentence Chunker]
-        CHUNK --> JSONL[data/chunks.jsonl]
-    end
-
-    subgraph Index ["4. Index"]
-        JSONL --> BM25[BM25Okapi]
-        JSONL --> EMBED[BGE-large-en-v1.5]
-        EMBED --> QD[(Qdrant Cloud)]
-        BM25 --> ZIP[artifacts_v1.zip]
-        ZIP --> R2_UP[(Cloudflare R2)]
-    end
+    S[Seed/KW] --> A[ArXiv API]
+    A --> N[(Neon PG)]
+    N --> D[PDF Download]
+    D --> P[PyMuPDF\nParse]
+    P --> C[Section\nChunker]
+    C --> J[JSONL\nChunks]
+    J --> B[rank-bm25\nIndex]
+    J --> E[BGE-Large\nEmbed]
+    E --> Q[(Qdrant)]
+    B --> R[(R2 Cloud)]
 ```
 
 ### Chunking Strategy: Hierarchical Section-Sentence
@@ -94,23 +76,15 @@ flowchart LR
 ## 3. Retrieval Pipeline
 
 ```mermaid
-flowchart TB
-    Q[User Query] --> IC[Intent Classification]
-    IC --> QD_DENSE[Intent-Aware Gating]
-
-    QD_DENSE --> DENSE[Dense: Qdrant arxiv_text]
-    QD_DENSE --> PC[Parent-Child: arxiv_docs → arxiv_text]
-    QD_DENSE --> HYDE[HyDE Restricted Excerpt]
-    IC --> LEX[Lexical: BM25]
-
-    DENSE & PC & LEX --> MERGE[Intent-Aware RRF Fusion]
-    HYDE -.->|auxiliary dense| DENSE
-
-    MERGE --> RERANK[BGE-Reranker-v2-m3]
-    RERANK --> BOOST[Section + Recency Boosts]
-    BOOST --> MMR[MMR Diversity Filter]
-    MMR --> COMPRESS[Context Compression]
-    COMPRESS --> GEN[LLM Generation: Scientific Grounding]
+flowchart LR
+    Q[Query] --> IC{Intent\nClass}
+    IC --> D[Dense\nBGE]
+    IC --> P[Parent\nDocs]
+    IC --> L[Lexical\nBM25]
+    D & P & L --> F[RRF\nFusion]
+    F --> R[BGE\nRerank]
+    R --> M[MMR\nFilter]
+    M --> LLM[Gemini 2.5\nGrounding]
 ```
 
 ### Retrieval Features & Ablations
@@ -136,39 +110,42 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant FE as React Frontend
-    participant API as FastAPI
-    participant RET as HybridRetriever
-    participant LLM as Gemini / Groq
+    participant API as Backend (HFS)
+    participant RET as Retriever
+    participant LLM as Inference
 
-    U->>FE: Type query + Send
-    FE->>API: POST /conversations/{id}/query/stream
-    API->>RET: classify_intent → HyDE → expand → dense+BM25+RRF
-    RET->>RET: parent-child · section boosts · rerank · MMR
-    API->>LLM: build_prompt → stream_generate_answer
-    LLM-->>FE: SSE: token stream
+    U->>API: /query/stream
+    API-->>U: sse: retrieval_start
+    API->>RET: Hybrid (BGE+BM25)
+    RET-->>API: Grounded Context
+    API-->>U: sse: retrieval_done
+    API->>LLM: Augmented Prompt
+    loop SSE Stream
+        LLM-->>U: sse: token
+    end
+    API-->>U: sse: done
 ```
 
 ### Add Document Flow
 ```mermaid
 flowchart LR
-    A["User submits arXiv ID"] --> B["POST /documents/add"]
-    B --> C["Queue job (Neon)"]
-    C --> D["Background: Fetch & Download PDF"]
-    D --> E["Extract & Chunk (PyMuPDF)"]
-    E --> F["Embed (BGE) & Upsert (Qdrant)"]
-    E --> G["BM25 hot-reload"]
+    ID[arXiv ID] --> POST[POST /add]
+    POST --> Q[Neon Queue]
+    Q --> B[Worker: PDF]
+    B --> C[Extract+Chunk]
+    C --> E[Embed+Upsert]
+    E --> S[Sync BM25]
 ```
 
 ### Chat with Document
 ```mermaid
 flowchart LR
-    Q["Query"] --> FILT["Qdrant MatchValue filter (paper_id)"]
-    FILT --> D["Dense retrieval (within paper)"]
-    Q --> BF["BM25 post-filter (paper_id)"]
-    D & BF --> RRF["Cross-encoder rerank"]
-    RRF --> PROMPT["Document-grounded prompt"]
-    PROMPT --> GEN["Gemini / Groq"]
+    Q[Query] --> F[Filter: Paper]
+    F --> D[Dense: Paper]
+    Q --> L[Lexical: Paper]
+    D & L --> R[BGE Rerank]
+    R --> P[Grounded Prompt]
+    P --> G[Gemini/Groq]
 ```
 
 ---
@@ -182,10 +159,12 @@ erDiagram
     papers {
         text paper_id PK
         text title
-        text abstract
-        timestamptz published
         text full_text
-        text layer
+    }
+    chunks {
+        text chunk_id PK
+        text paper_id FK
+        text chunk_text
     }
     citation_edges {
         text source_paper_id FK
@@ -193,23 +172,29 @@ erDiagram
     }
     users {
         uuid id PK
-        varchar email
-        varchar hashed_password
+        text email
+    }
+    document_jobs {
+        uuid id PK
+        uuid user_id FK
+        text arxiv_id
     }
     conversations {
         uuid id PK
         uuid user_id FK
-        varchar paper_id
+        text paper_id
     }
     messages {
         uuid id PK
         uuid conversation_id FK
-        varchar role
         text content
     }
-    papers ||--o{ citation_edges : "references"
-    users ||--o{ conversations : "owns"
-    conversations ||--o{ messages : "contains"
+
+    papers ||--o{ chunks : decomposes
+    papers ||--o{ citation_edges : cites
+    users ||--o{ document_jobs : tracks
+    users ||--o{ conversations : starts
+    conversations ||--o{ messages : records
 ```
 
 ### Qdrant Cloud Collections

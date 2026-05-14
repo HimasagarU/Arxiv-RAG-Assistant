@@ -31,34 +31,33 @@ For database schemas, CLI commands, and API docs, see the [**Technical Architect
 ```mermaid
 flowchart TB
     subgraph Client ["Client"]
-        U[👤 User] --> FE["React / Vite SPA\n(Vercel)"]
+        U[👤 User] --> FE["React SPA\n(Vercel)"]
     end
 
-    subgraph Backend ["FastAPI Backend (Docker · HF Spaces)"]
+    subgraph Backend ["FastAPI Container\n(HF Spaces / Docker)"]
         direction TB
-        API["REST API + SSE Streaming\n/query · /query/stream"]
-        AUTH["JWT Auth\nbcrypt · HS256 · refresh revocation"]
-        CHAT["Conversation Manager\nSliding-window context · 20-query cap"]
-        DOC["Document Ingestion\nLive arXiv PDF pipeline"]
-        RET["HybridRetriever\nIntent-Aware Precision · BGE-Reranker-v2-m3"]
+        API["FastAPI\nREST + SSE"]
+        AUTH["JWT Auth\nHS256"]
+        CHAT["Chat Mgr\nHistory"]
+        DOC["Ingestion\nPyMuPDF"]
+        RET["Retriever\nHybrid+BGE"]
     end
 
-    subgraph Storage ["Cloud Storage"]
-        QDRANT[("Qdrant Cloud\narxiv_text · arxiv_docs")]
-        NEON[("Neon PostgreSQL\nPapers · Users · Chats · Jobs")]
-        R2[("Cloudflare R2\nBM25 Artifact ZIP")]
-        REDIS[("Redis Cloud\nSession + Query Cache")]
+    subgraph Storage ["Cloud Data Layer"]
+        QDRANT[("Qdrant\nVectors")]
+        NEON[("Neon PG\nMeta+Auth")]
+        R2[("R2 Cloud\nBM25 Artifact")]
+        REDIS[("Redis\nCache")]
     end
 
-    subgraph LLM ["LLM Layer"]
-        GEMINI["Gemini 2.5 Flash\nAuthenticated chat (primary)"]
-        GROQ["Groq · Llama 3.3 70B\nPublic queries · HyDE · Fallback"]
+    subgraph LLM ["Inference Layer"]
+        GEMINI["Gemini 2.5 Flash\nPrimary"]
+        GROQ["Groq Llama 3.3\nFallback/HyDE"]
     end
 
     FE -->|REST + SSE| API
     API --> AUTH & CHAT & DOC & RET
-    RET --> QDRANT & REDIS
-    RET -->|BM25 artifacts| R2
+    RET --> QDRANT & REDIS & R2
     CHAT --> NEON & REDIS
     AUTH --> NEON & REDIS
     DOC --> QDRANT & NEON
@@ -74,82 +73,65 @@ flowchart TB
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant FE as React Frontend
+    participant FE as React
     participant API as FastAPI
-    participant RET as HybridRetriever
-    participant LLM as Gemini / Groq
+    participant RET as Retriever
+    participant LLM as Gemini 2.5
 
-    U->>FE: Type query + Send
-    FE->>FE: Optimistic assistant bubble (empty)
-    FE->>API: POST /conversations/{id}/query/stream
-    API-->>FE: SSE: retrieval_start
-    FE->>FE: Show "Hybrid retrieval in progress…"
-
-    API->>RET: classify_intent → HyDE → expand → dense+BM25+RRF
-    RET->>RET: parent-child · section boosts · rerank · MMR · compress
-    API-->>FE: SSE: retrieval_done {num_chunks, trace}
-    FE->>FE: Show "Retrieved N chunks · reranked"
-
-    API->>LLM: build_prompt → stream_generate_answer
-    loop Token streaming
-        LLM-->>API: token chunk
-        API-->>FE: SSE: token {content}
-        FE->>FE: Append token to bubble
+    U->>FE: Research Question
+    FE->>API: /query/stream
+    API-->>FE: sse: retrieval_start
+    
+    API->>RET: Hybrid (BM25+Dense) + BGE Rerank
+    RET-->>API: 6 Grounded Chunks
+    
+    API-->>FE: sse: retrieval_done
+    
+    API->>LLM: Augmented Prompt
+    loop SSE Stream
+        LLM-->>FE: sse: token content
     end
-
-    API-->>FE: SSE: done {sources, message_count}
-    FE->>FE: Attach source citations to bubble
-    API->>API: Save messages + cache in Redis
+    
+    API-->>FE: sse: done {sources}
 ```
 
 ### Add Document Flow (Live Ingestion)
 
 ```mermaid
 flowchart LR
-    A["User submits\narXiv ID"] --> B["POST /documents/add\n(authenticated)"]
-    B --> C["Queue document job\n(Neon · status=pending)"]
-    C --> D["Background thread"]
-    D --> E["arXiv API\nMetadata fetch"]
-    E --> F["PDF Download\nCloudflare R2 / direct"]
-    F --> G["PyMuPDF extraction\n+ pdfplumber fallback"]
-    G --> H["Section-Sentence Chunker\nHierarchical · 450-token target"]
-    H --> I["BGE-Large-EN-v1.5\nEmbedding (1024-dim)"]
-    I --> J["Qdrant upsert\narxiv_text + arxiv_docs"]
-    H --> K["BM25 hot-reload\nin-memory index update"]
-    J & K --> L["Job status = done\nImmediately queryable"]
-    L --> M["Frontend polls\nGET /documents/status/{job_id}"]
+    ID["arXiv ID"] --> POST["POST /doc/add"]
+    POST --> Q["Queue\n(Neon)"]
+    Q --> DL["PDF Download\n(R2)"]
+    DL --> P["PyMuPDF\nExtraction"]
+    P --> C["Hierarchical\nChunking"]
+    C --> E["BGE Embed\n(1024-dim)"]
+    E --> U["Qdrant\nUpsert"]
+    U --> B["BM25 Index\nHot-Reload"]
 ```
 
 ### Chat with Document Flow
 
 ```mermaid
-flowchart TB
-    U["User opens paper\nin Dashboard"] --> SC["Create conversation\nwith paper_id"]
-    SC --> Q["User query"]
-    Q --> FILT["Qdrant MatchValue filter\npaper_id == target"]
-    FILT --> D["Dense retrieval\narxiv_text (paper only)"]
-    Q --> BF["BM25 post-filter\npaper_id == target"]
-    D & BF --> RRF["RRF fusion\n(within paper)"]
-    RRF --> RR["BGE-Reranker-v2-m3\nPrecision reranking"]
-    RR --> PROMPT["Scientific-grounded prompt\nStrict attribution & uncertainty"]
-    PROMPT --> GEN["Gemini 1.5 / 3.x Flash\n→ Groq fallback"]
-    GEN --> ANS["Grounded answer\nwith claim verification"]
+flowchart LR
+    Q["Query"] --> FILT["Filter\n(Paper ID)"]
+    FILT --> RET["Retrieve\n(Within Paper)"]
+    RET --> RR["BGE Rerank\nPrecision"]
+    RR --> GEN["Gemini\nStrict Grounding"]
+    GEN --> ANS["Claim verified\nAnswer"]
 
     style FILT fill:#7c3aed,color:#fff
-    style BF fill:#7c3aed,color:#fff
-    style PROMPT fill:#dc2626,color:#fff
+    style RET fill:#7c3aed,color:#fff
+    style RR fill:#dc2626,color:#fff
 ```
 
 ### Similar Papers Flow
 
 ```mermaid
 flowchart LR
-    A["GET /paper/{id}/similar"] --> B{"arxiv_docs\nvector exists?"}
-    B -->|Yes| C["Use title+abstract\npaper-level vector\n(arxiv_docs collection)"]
-    B -->|No| D["Compute mean over\nchunk vectors\n(arxiv_text collection)"]
-    C & D --> E["Qdrant nearest-neighbour\nsearch · cosine similarity"]
-    E --> F["Filter out source paper\n+ dedup by paper_id"]
-    F --> G["Return top-N\nsimilar papers\nwith similarity scores"]
+    ID["Paper ID"] --> VEC["Doc Vector\n(Centroid)"]
+    VEC --> NN["Qdrant NN\n(Cosine)"]
+    NN --> F["Filter\n(Self+Dedup)"]
+    F --> R["Results\n(Sim Score)"]
 ```
 
 ---
@@ -166,7 +148,7 @@ flowchart LR
 | **Cache** | Redis Cloud (session cache, query cache) |
 | **Embeddings** | BAAI/bge-large-en-v1.5 (1024-dim) |
 | **Reranker** | BAAI/bge-reranker-v2-m3 |
-| **Primary LLM** | Google Gemini 1.5 / 3.x Flash |
+| **Primary LLM** | Google Gemini 2.5 Flash |
 | **Fallback LLM** | Groq LLaMA 3.3 70B Versatile |
 
 ---

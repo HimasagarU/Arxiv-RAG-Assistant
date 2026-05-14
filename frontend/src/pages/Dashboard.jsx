@@ -15,6 +15,7 @@ export default function Dashboard() {
   const [addingDoc, setAddingDoc] = useState(false);
   const [addError, setAddError] = useState('');
   const [loading, setLoading] = useState(true);
+  const [isCreatingChat, setIsCreatingChat] = useState(false);
   const pollingJobsRef = useRef(new Set());
   const [chatPage, setChatPage] = useState(1);
   const [docPage, setDocPage] = useState(1);
@@ -39,20 +40,24 @@ export default function Dashboard() {
   }
 
   async function handleNewChat() {
+    setIsCreatingChat(true);
     try {
       const conv = await createConversation();
       navigate(`/chat/${conv.id}`);
     } catch (err) {
       console.error('Failed to create conversation', err);
+      setIsCreatingChat(false);
     }
   }
 
   async function handleDeleteConv(id) {
+    // Optimistic deletion
+    setConversations((prev) => prev.filter((c) => c.id !== id));
     try {
       await deleteConversation(id);
-      setConversations((prev) => prev.filter((c) => c.id !== id));
     } catch (err) {
       console.error('Failed to delete', err);
+      loadData(); // Revert on failure
     }
   }
 
@@ -137,8 +142,8 @@ export default function Dashboard() {
       <main className="mx-auto max-w-6xl px-4 sm:px-6 py-8">
         {/* Quick Actions */}
         <div className="flex flex-wrap gap-4 mb-8 items-center">
-          <button id="new-chat-btn" onClick={handleNewChat} className="btn-primary flex items-center gap-2">
-            <span>+</span> New Conversation
+          <button id="new-chat-btn" onClick={handleNewChat} disabled={isCreatingChat} className="btn-primary flex items-center gap-2">
+            <span>+</span> {isCreatingChat ? 'Creating...' : 'New Conversation'}
           </button>
           <button id="add-doc-btn" onClick={() => setShowAddDoc(true)} className="btn-soft flex items-center gap-2">
             <span>📄</span> Add Document

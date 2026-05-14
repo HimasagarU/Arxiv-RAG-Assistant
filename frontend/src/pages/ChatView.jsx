@@ -1,59 +1,223 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, memo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { getMessages, sendQuery, listConversations, createConversation, deleteConversation, getSimilarPapers } from '../api';
+import {
+  getMessages, sendQuery, streamConversationQuery,
+  listConversations, createConversation, deleteConversation, getSimilarPapers,
+} from '../api';
 import ThemeToggle from '../components/ThemeToggle';
+import { renderMarkdown } from '../utils/renderMarkdown';
 
 const MAX_QUERIES = 20;
+
+// ── Memoized message components ─────────────────────────────
+
+const UserMessage = memo(function UserMessage({ content }) {
+  return (
+    <div className="max-w-lg px-4 py-3 rounded-2xl rounded-br-sm"
+         style={{ background: 'linear-gradient(135deg, #6366f1, #7c3aed)', color: '#fff' }}>
+      <p className="text-sm leading-relaxed">{content}</p>
+    </div>
+  );
+});
+
+const SourceItem = memo(function SourceItem({ src, id, expanded, onToggle }) {
+  const [similarPapers, setSimilarPapers] = useState(undefined);
+  const [loadingSimilar, setLoadingSimilar] = useState(false);
+
+  async function handleLoadSimilar() {
+    if (similarPapers !== undefined) return;
+    setLoadingSimilar(true);
+    try {
+      const data = await getSimilarPapers(src.paper_id);
+      setSimilarPapers(data.similar_papers || []);
+    } catch {
+      setSimilarPapers(null);
+    } finally {
+      setLoadingSimilar(false);
+    }
+  }
+
+  return (
+    <div>
+      <button
+        className="text-xs text-left w-full p-2 rounded-lg transition-colors border"
+        style={{
+          background: expanded ? 'var(--color-bg-hover)' : 'transparent',
+          color: 'var(--color-accent)',
+          borderColor: 'transparent',
+        }}
+        onClick={onToggle}
+      >
+        [{id}] {src.title}
+        {src.rerank_score > 0 && (
+          <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>
+            (score: {src.rerank_score.toFixed(3)})
+          </span>
+        )}
+      </button>
+      {expanded && (
+        <div className="ml-4 mt-1 p-3 rounded-lg text-xs animate-fade-in"
+             style={{ background: 'var(--color-bg-primary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}>
+          <div className="flex justify-between items-start mb-2">
+            <div>
+              <p className="mb-1"><strong>Paper:</strong> {src.paper_id}</p>
+              {src.authors && <p className="mb-1"><strong>Authors:</strong> {src.authors}</p>}
+            </div>
+            {src.paper_id && (
+              <a href={`https://arxiv.org/abs/${src.paper_id}`} target="_blank" rel="noopener noreferrer"
+                 className="text-xs hover:underline flex items-center gap-1" style={{ color: 'var(--color-accent)' }}>
+                View on ArXiv ↗
+              </a>
+            )}
+          </div>
+          <p className="mt-2 leading-relaxed" style={{ color: 'var(--color-text-secondary)' }}>
+            {src.chunk_text?.slice(0, 500)}
+            {src.chunk_text?.length > 500 && '…'}
+          </p>
+
+          {/* Similar Papers */}
+          {src.paper_id && (
+            <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
+              {similarPapers === undefined && !loadingSimilar ? (
+                <button onClick={handleLoadSimilar}
+                        className="text-[11px] px-2 py-1 rounded transition-colors"
+                        style={{ background: 'var(--color-warning)', color: '#fff' }}>
+                  Find Similar Papers
+                </button>
+              ) : loadingSimilar ? (
+                <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>Loading…</span>
+              ) : similarPapers === null ? (
+                <span className="text-[11px]" style={{ color: 'var(--color-error)' }}>Failed to load</span>
+              ) : (
+                <div className="space-y-1">
+                  <p className="text-[11px] font-semibold mb-1" style={{ color: 'var(--color-text-primary)' }}>Similar Papers:</p>
+                  {similarPapers.map((p, idx) => (
+                    <div key={idx} className="flex justify-between items-center bg-[var(--color-bg-secondary)] p-1.5 rounded">
+                      <a href={`https://arxiv.org/abs/${p.paper_id}`} target="_blank" rel="noopener noreferrer"
+                         className="truncate flex-1 text-[11px] hover:underline" style={{ color: 'var(--color-accent)' }}>
+                        {p.title}
+                      </a>
+                      <span className="text-[10px] ml-2" style={{ color: 'var(--color-text-muted)' }}>
+                        {(p.similarity_score * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
+
+const AssistantMessage = memo(function AssistantMessage({ msg, msgIdx, streaming }) {
+  const [expandedSource, setExpandedSource] = useState(null);
+
+  function parseSources(sourcesJson) {
+    if (!sourcesJson) return [];
+    try { return JSON.parse(sourcesJson); } catch { return []; }
+  }
+
+  const sources = parseSources(msg.sources_json);
+
+  return (
+    <div className="w-full">
+      <div className="glass-card p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
+               style={{ background: 'var(--color-accent-glow)', color: 'var(--color-accent)' }}>
+            AI
+          </div>
+          <span className="text-xs font-medium" style={{ color: 'var(--color-text-muted)' }}>
+            Research Assistant
+          </span>
+          {streaming && (
+            <span className="inline-block w-2 h-3 rounded-sm animate-pulse ml-1"
+                  style={{ background: 'var(--color-accent)' }} />
+          )}
+        </div>
+
+        {msg.retrievalStatus && (
+          <div className="mb-3 px-3 py-2 rounded-lg text-xs flex items-center gap-2"
+               style={{ background: 'var(--color-bg-hover)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}>
+            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+              msg.retrievalStatus === 'done'
+                ? 'bg-[var(--color-success)]'
+                : 'bg-[var(--color-accent)] animate-pulse'
+            }`} />
+            {msg.retrievalStatus === 'done'
+              ? `Retrieved ${msg.retrievalChunks ?? ''} chunks · reranked`
+              : 'Hybrid retrieval in progress…'}
+          </div>
+        )}
+
+        <div
+          className="chat-markdown text-sm leading-relaxed"
+          style={{ color: 'var(--color-text-primary)' }}
+          dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
+        />
+
+        {/* Sources */}
+        {sources.length > 0 && (
+          <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
+            <p className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-muted)' }}>
+              📚 Sources ({sources.length})
+            </p>
+            <div className="space-y-2">
+              {sources.map((src, si) => (
+                <SourceItem
+                  key={si}
+                  src={src}
+                  id={si + 1}
+                  expanded={expandedSource === si}
+                  onToggle={() => setExpandedSource(expandedSource === si ? null : si)}
+                />
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+});
+
+// ── Main component ───────────────────────────────────────────
 
 export default function ChatView() {
   const { conversationId } = useParams();
   const navigate = useNavigate();
   const { user, logout } = useAuth();
 
-  const [messages, setMessages] = useState([]);
+  const [messages, setMessages]         = useState([]);
   const [conversations, setConversations] = useState([]);
-  const [query, setQuery] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState('');
-  const [expandedSource, setExpandedSource] = useState(null);
-  const [similarPapers, setSimilarPapers] = useState({});
-  const [loadingSimilar, setLoadingSimilar] = useState({});
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [query, setQuery]               = useState('');
+  const [loading, setLoading]           = useState(false);
+  const [sending, setSending]           = useState(false);
+  const [error, setError]               = useState('');
+  const [sidebarOpen, setSidebarOpen]   = useState(true);
+  const [topK, setTopK]                 = useState('10');
+
   const messagesEndRef = useRef(null);
-  const inputRef = useRef(null);
+  const inputRef       = useRef(null);
+  // Stable ID for the currently streaming assistant message
+  const streamingMsgId = useRef(null);
 
   const queryCount = Math.floor(messages.filter((m) => m.role === 'user').length);
 
   useEffect(() => {
-    async function fetchConversations() {
-      try {
-        const convs = await listConversations();
-        setConversations(convs);
-      } catch (err) {
-        console.error('Failed to load conversations', err);
-      }
-    }
-
-    fetchConversations();
+    listConversations().then(setConversations).catch(console.error);
   }, []);
 
   useEffect(() => {
-    async function fetchMessages() {
-      setLoading(true);
-      setError('');
-      try {
-        const msgs = await getMessages(conversationId);
-        setMessages(msgs);
-      } catch (err) {
-        setError(err.message);
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchMessages();
+    setLoading(true);
+    setError('');
+    getMessages(conversationId)
+      .then(setMessages)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false));
   }, [conversationId]);
 
   useEffect(() => {
@@ -64,33 +228,83 @@ export default function ChatView() {
     e.preventDefault();
     if (!query.trim() || sending) return;
 
-    const userMsg = { role: 'user', content: query, id: `temp-${Date.now()}` };
-    setMessages((prev) => [...prev, userMsg]);
     const currentQuery = query;
+    const userMsgId    = `user-${Date.now()}`;
+    const asstMsgId    = `asst-${Date.now()}`;
+    streamingMsgId.current = asstMsgId;
+
+    // Optimistic user message
+    setMessages((prev) => [...prev, { role: 'user', content: currentQuery, id: userMsgId }]);
     setQuery('');
     setSending(true);
     setError('');
 
-    try {
-      const res = await sendQuery(conversationId, currentQuery);
-      const assistantMsg = {
-        role: 'assistant',
-        content: res.answer,
-        sources_json: JSON.stringify(res.sources),
-        id: `res-${Date.now()}`,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-      const convs = await listConversations();
-      setConversations(convs);
-    } catch (err) {
-      setError(err.message);
-      // Remove the optimistic user message on failure
-      setMessages((prev) => prev.filter((m) => m.id !== userMsg.id));
-      setQuery(currentQuery);
-    } finally {
-      setSending(false);
-      inputRef.current?.focus();
-    }
+    // Optimistic assistant placeholder
+    setMessages((prev) => [...prev, {
+      role: 'assistant',
+      content: '',
+      sources_json: null,
+      id: asstMsgId,
+      retrievalStatus: 'searching',
+      retrievalChunks: null,
+      streaming: true,
+    }]);
+
+    let firstToken = false;
+
+    await streamConversationQuery(conversationId, currentQuery, {
+      topK: parseInt(topK, 10),
+
+      onRetrievalStart: () => {
+        setMessages((prev) => prev.map((m) =>
+          m.id === asstMsgId ? { ...m, retrievalStatus: 'searching' } : m
+        ));
+      },
+
+      onRetrievalDone: (payload) => {
+        setMessages((prev) => prev.map((m) =>
+          m.id === asstMsgId
+            ? { ...m, retrievalStatus: 'done', retrievalChunks: payload.num_chunks }
+            : m
+        ));
+      },
+
+      onToken: (token) => {
+        firstToken = true;
+        setMessages((prev) => prev.map((m) =>
+          m.id === asstMsgId ? { ...m, content: m.content + token } : m
+        ));
+      },
+
+      onError: (msg) => {
+        setError(msg);
+        if (!firstToken) {
+          // Remove optimistic messages on pre-token failure
+          setMessages((prev) => prev.filter((m) => m.id !== userMsgId && m.id !== asstMsgId));
+          setQuery(currentQuery);
+        } else {
+          // Mark streaming done even on error
+          setMessages((prev) => prev.map((m) =>
+            m.id === asstMsgId ? { ...m, streaming: false } : m
+          ));
+        }
+      },
+
+      onDone: (payload) => {
+        const sources     = payload.sources || [];
+        const sourcesJson = JSON.stringify(sources);
+        setMessages((prev) => prev.map((m) =>
+          m.id === asstMsgId
+            ? { ...m, sources_json: sourcesJson, streaming: false, retrievalStatus: 'done' }
+            : m
+        ));
+        // Refresh conversation list (title auto-set after first message)
+        listConversations().then(setConversations).catch(() => {});
+      },
+    });
+
+    setSending(false);
+    inputRef.current?.focus();
   }
 
   async function handleNewChat() {
@@ -108,42 +322,10 @@ export default function ChatView() {
     try {
       await deleteConversation(id);
       setConversations((prev) => prev.filter((c) => c.id !== id));
-      if (id === conversationId) navigate('/');
+      if (id === conversationId) navigate('/dashboard');
     } catch (err) {
       console.error('Failed to delete conversation', err);
     }
-  }
-
-  function parseSources(sourcesJson) {
-    if (!sourcesJson) return [];
-    try {
-      return JSON.parse(sourcesJson);
-    } catch {
-      return [];
-    }
-  }
-
-  async function handleLoadSimilar(paperId, key) {
-    if (similarPapers[key] !== undefined) return; // already loaded or loading
-    setLoadingSimilar((prev) => ({ ...prev, [key]: true }));
-    try {
-      const data = await getSimilarPapers(paperId);
-      setSimilarPapers((prev) => ({ ...prev, [key]: data.similar_papers || [] }));
-    } catch (err) {
-      console.error(err);
-      setSimilarPapers((prev) => ({ ...prev, [key]: null }));
-    } finally {
-      setLoadingSimilar((prev) => ({ ...prev, [key]: false }));
-    }
-  }
-
-  function renderMarkdown(text) {
-    // Simple markdown rendering
-    return text
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*(.*?)\*/g, '<em>$1</em>')
-      .replace(/`(.*?)`/g, '<code>$1</code>')
-      .replace(/\n/g, '<br/>');
   }
 
   return (
@@ -177,9 +359,7 @@ export default function ChatView() {
             <div
               key={conv.id}
               className={`p-3 rounded-xl cursor-pointer flex items-start justify-between gap-3 group transition-colors border ${conv.id === conversationId ? 'bg-[var(--color-bg-hover)] border-[var(--color-border)]' : 'bg-transparent border-transparent hover:bg-[var(--color-bg-hover)] hover:border-[var(--color-border)]'}`}
-              style={{
-                color: conv.id === conversationId ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
-              }}
+              style={{ color: conv.id === conversationId ? 'var(--color-text-primary)' : 'var(--color-text-secondary)' }}
               onClick={() => navigate(`/chat/${conv.id}`)}
             >
               <div className="flex-1 min-w-0">
@@ -227,11 +407,11 @@ export default function ChatView() {
           <button onClick={() => setSidebarOpen(!sidebarOpen)} className="icon-btn text-lg" aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}>
             {sidebarOpen ? '◀' : '▶'}
           </button>
-          
+
           <button onClick={() => navigate('/dashboard')} className="btn-soft text-sm flex items-center gap-1">
             <span>←</span> Back to Dashboard
           </button>
-          
+
           <div className="flex-1" />
           <ThemeToggle />
           {/* Query counter */}
@@ -282,142 +462,19 @@ export default function ChatView() {
                 <div
                   key={msg.id || i}
                   className={`animate-fade-in ${msg.role === 'user' ? 'flex justify-end' : ''}`}
-                  style={{ animationDelay: `${i * 30}ms` }}
+                  style={{ animationDelay: `${Math.min(i, 10) * 30}ms` }}
                 >
                   {msg.role === 'user' ? (
-                    <div className="max-w-lg px-4 py-3 rounded-2xl rounded-br-sm"
-                         style={{ background: 'linear-gradient(135deg, #6366f1, #7c3aed)', color: '#fff' }}>
-                      <p className="text-sm leading-relaxed">{msg.content}</p>
-                    </div>
+                    <UserMessage content={msg.content} />
                   ) : (
-                    <div className="w-full">
-                      <div className="glass-card p-5">
-                        <div className="flex items-center gap-2 mb-3">
-                          <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
-                               style={{ background: 'var(--color-accent-glow)', color: 'var(--color-accent)' }}>
-                            AI
-                          </div>
-                          <span className="text-xs font-medium" style={{ color: 'var(--color-text-muted)' }}>
-                            Research Assistant
-                          </span>
-                        </div>
-                        <div
-                          className="chat-markdown text-sm leading-relaxed"
-                          style={{ color: 'var(--color-text-primary)' }}
-                          dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }}
-                        />
-
-                        {/* Sources */}
-                        {(() => {
-                          const sources = parseSources(msg.sources_json);
-                          if (sources.length === 0) return null;
-                          return (
-                            <div className="mt-4 pt-4 border-t" style={{ borderColor: 'var(--color-border)' }}>
-                              <p className="text-xs font-medium mb-2" style={{ color: 'var(--color-text-muted)' }}>
-                                📚 Sources ({sources.length})
-                              </p>
-                              <div className="space-y-2">
-                                {sources.map((src, si) => (
-                                  <div key={si}>
-                                    <button
-                                      className="text-xs text-left w-full p-2 rounded-lg transition-colors border"
-                                      style={{
-                                        background: expandedSource === `${i}-${si}` ? 'var(--color-bg-hover)' : 'transparent',
-                                        color: 'var(--color-accent)',
-                                        borderColor: 'transparent',
-                                      }}
-                                      onClick={() => setExpandedSource(expandedSource === `${i}-${si}` ? null : `${i}-${si}`)}
-                                    >
-                                      [{si + 1}] {src.title}
-                                      {src.rerank_score > 0 && (
-                                        <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>
-                                          (score: {src.rerank_score.toFixed(3)})
-                                        </span>
-                                      )}
-                                    </button>
-                                    {expandedSource === `${i}-${si}` && (
-                                      <div className="ml-4 mt-1 p-3 rounded-lg text-xs animate-fade-in"
-                                           style={{ background: 'var(--color-bg-primary)', color: 'var(--color-text-secondary)', border: '1px solid var(--color-border)' }}>
-                                        <div className="flex justify-between items-start mb-2">
-                                          <div>
-                                            <p className="mb-1"><strong>Paper:</strong> {src.paper_id}</p>
-                                            {src.authors && <p className="mb-1"><strong>Authors:</strong> {src.authors}</p>}
-                                          </div>
-                                          {src.paper_id && (
-                                            <a href={`https://arxiv.org/abs/${src.paper_id}`} target="_blank" rel="noopener noreferrer"
-                                               className="text-xs hover:underline flex items-center gap-1" style={{ color: 'var(--color-accent)' }}>
-                                              View on ArXiv ↗
-                                            </a>
-                                          )}
-                                        </div>
-                                        <p className="mt-2 leading-relaxed" style={{ color: 'var(--color-text-secondary)' }}>
-                                          {src.chunk_text?.slice(0, 500)}
-                                          {src.chunk_text?.length > 500 && '...'}
-                                        </p>
-                                        
-                                        {/* Similar Papers */}
-                                        {src.paper_id && (
-                                          <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-border)' }}>
-                                            {!similarPapers[`${i}-${si}`] && !loadingSimilar[`${i}-${si}`] ? (
-                                              <button onClick={() => handleLoadSimilar(src.paper_id, `${i}-${si}`)}
-                                                      className="text-[11px] px-2 py-1 rounded transition-colors"
-                                                      style={{ background: 'var(--color-warning)', color: '#fff' }}>
-                                                Find Similar Papers
-                                              </button>
-                                            ) : loadingSimilar[`${i}-${si}`] ? (
-                                              <span className="text-[11px]" style={{ color: 'var(--color-text-muted)' }}>Loading...</span>
-                                            ) : similarPapers[`${i}-${si}`] === null ? (
-                                              <span className="text-[11px]" style={{ color: 'var(--color-error)' }}>Failed to load</span>
-                                            ) : (
-                                              <div className="space-y-1">
-                                                <p className="text-[11px] font-semibold mb-1" style={{ color: 'var(--color-text-primary)' }}>Similar Papers:</p>
-                                                {similarPapers[`${i}-${si}`].map((p, idx) => (
-                                                  <div key={idx} className="flex justify-between items-center bg-[var(--color-bg-secondary)] p-1.5 rounded">
-                                                     <a href={`https://arxiv.org/abs/${p.paper_id}`} target="_blank" rel="noopener noreferrer"
-                                                       className="truncate flex-1 text-[11px] hover:underline" style={{ color: 'var(--color-accent)' }}>
-                                                      {p.title}
-                                                    </a>
-                                                    <span className="text-[10px] ml-2" style={{ color: 'var(--color-text-muted)' }}>
-                                                      {(p.similarity_score * 100).toFixed(1)}%
-                                                    </span>
-                                                  </div>
-                                                ))}
-                                              </div>
-                                            )}
-                                          </div>
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                ))}
-                              </div>
-                            </div>
-                          );
-                        })()}
-                      </div>
-                    </div>
+                    <AssistantMessage
+                      msg={msg}
+                      msgIdx={i}
+                      streaming={msg.streaming}
+                    />
                   )}
                 </div>
               ))}
-
-              {sending && (
-                <div className="animate-fade-in">
-                  <div className="glass-card p-5">
-                    <div className="flex items-center gap-2">
-                      <div className="w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
-                           style={{ background: 'var(--color-accent-glow)', color: 'var(--color-accent)' }}>
-                        AI
-                      </div>
-                      <div className="flex gap-1">
-                        <div className="w-2 h-2 rounded-full" style={{ background: 'var(--color-accent)', animation: 'pulse-glow 1s ease-in-out infinite' }} />
-                        <div className="w-2 h-2 rounded-full" style={{ background: 'var(--color-accent)', animation: 'pulse-glow 1s ease-in-out 0.2s infinite' }} />
-                        <div className="w-2 h-2 rounded-full" style={{ background: 'var(--color-accent)', animation: 'pulse-glow 1s ease-in-out 0.4s infinite' }} />
-                      </div>
-                      <span className="text-xs" style={{ color: 'var(--color-text-muted)' }}>Searching papers & generating answer...</span>
-                    </div>
-                  </div>
-                </div>
-              )}
 
               <div ref={messagesEndRef} />
             </div>
@@ -434,24 +491,34 @@ export default function ChatView() {
               </div>
             )}
             <form onSubmit={handleSend} className="max-w-3xl mx-auto flex gap-3">
+              <select
+                className="bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-lg px-2 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+                value={topK}
+                onChange={(e) => setTopK(e.target.value)}
+                disabled={sending || loading}
+                title="Chunks to retrieve"
+              >
+                <option value="5">5 Chunks</option>
+                <option value="10">10 Chunks</option>
+              </select>
               <input
                 ref={inputRef}
                 id="chat-input"
                 type="text"
                 className="input-field flex-1"
-                placeholder={queryCount >= MAX_QUERIES ? 'Query limit reached — start a new conversation' : 'Ask about AI research papers...'}
+                placeholder={queryCount >= MAX_QUERIES ? 'Query limit reached — start a new conversation' : 'Ask about AI research papers…'}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                disabled={sending || queryCount >= MAX_QUERIES}
+                disabled={sending || loading || queryCount >= MAX_QUERIES}
                 autoFocus
               />
               <button
                 id="chat-send"
                 type="submit"
                 className="btn-primary"
-                disabled={sending || !query.trim() || queryCount >= MAX_QUERIES}
+                disabled={sending || loading || !query.trim() || queryCount >= MAX_QUERIES}
               >
-                {sending ? '...' : 'Send'}
+                {sending ? '…' : 'Send'}
               </button>
             </form>
           </div>
