@@ -41,6 +41,7 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 JOB_ACTIVE_STATUSES = frozenset({"queued", "downloading", "chunking", "embedding"})
+JOB_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +96,31 @@ def _ensure_backend_imports() -> None:
         sys.modules["ingest"] = ingest_pkg
 
 
+def _get_job_status(job_id: str) -> Optional[str]:
+    """Return the current persisted status for a job, or None if unavailable."""
+    app_db_url = os.getenv("APP_DATABASE_URL", "")
+    if not app_db_url:
+        return None
+
+    import psycopg
+    from psycopg.rows import dict_row
+
+    try:
+        with psycopg.connect(app_db_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT status FROM document_jobs WHERE id = %s", (job_id,))
+                row = cur.fetchone()
+                if row:
+                    return row["status"]
+    except Exception as e:
+        log.warning(f"Failed to read job {job_id} status: {e}")
+    return None
+
+
+def _is_cancelled(job_id: str) -> bool:
+    return _get_job_status(job_id) == "cancelled"
+
+
 # ---------------------------------------------------------------------------
 # Background ingestion task
 # ---------------------------------------------------------------------------
@@ -144,6 +170,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             log.error(f"Failed to update job {job_id}: {e}")
 
     try:
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} was cancelled before start.")
+            return
+
         # Stage 1: Downloading
         _update_job("downloading")
         log.info(f"[Ingest] Downloading paper {arxiv_id}...")
@@ -167,6 +197,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         categories = ", ".join(t.get("term", "") for t in entry.get("tags", []))
         published_raw = entry.get("published") or entry.get("updated") or ""
 
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled after metadata fetch.")
+            return
+
         # Download PDF
         actual_pdf_url = pdf_url or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
         pdf_resp = requests.get(actual_pdf_url, timeout=120)
@@ -176,6 +210,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
 
         pdf_bytes = pdf_resp.content
         _update_job("downloading", title=paper_title)
+
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled after PDF download.")
+            return
 
         # Upload PDF to R2
         try:
@@ -201,6 +239,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             _update_job("failed", error="Could not extract text from PDF.")
             return
 
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled after text extraction.")
+            return
+
         # Chunk the text using the existing pipeline
         from ingest.chunking import chunk_paper, get_tokenizer
         tokenizer = get_tokenizer()
@@ -223,9 +265,17 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
 
         log.info(f"[Ingest] Produced {len(chunks)} chunks for {arxiv_id}")
 
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled after chunking.")
+            return
+
         # Stage 3: Embedding + storing
         _update_job("embedding")
         log.info(f"[Ingest] Embedding {len(chunks)} chunks for {arxiv_id}...")
+
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled before persistence.")
+            return
 
         # Store paper in Neon DB
         from db.database import get_db
@@ -255,6 +305,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             log.info(f"[Ingest] Appended {len(chunks)} chunks to {chunks_path}")
         except Exception as e:
             log.error(f"[Ingest] Failed to append chunks to offline JSONL: {e}")
+
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled after local persistence.")
+            return
 
         # Embed and upsert to Qdrant
         try:
@@ -325,6 +379,14 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
                 log.info(f"[Ingest] Updated in-memory HybridRetriever (BM25 + metadata) for {arxiv_id}")
         except Exception as e:
             log.warning(f"Qdrant/BM25 update failed (non-fatal): {e}")
+
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled after vector store updates.")
+            return
+
+        if _is_cancelled(job_id):
+            log.info(f"[Ingest] Job {job_id} cancelled before completion.")
+            return
 
         # Stage 4: Done
         _update_job("done", title=paper_title, chunks=len(chunks))
@@ -470,3 +532,29 @@ async def list_documents(
     )
     jobs = result.scalars().all()
     return [_job_to_response(j) for j in jobs]
+
+
+@router.post("/cancel/{job_id}", response_model=DocumentJobResponse)
+async def cancel_document(
+    job_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_app_db),
+):
+    """Cancel an in-progress document ingestion job."""
+    result = await db.execute(
+        select(DocumentJob).where(
+            DocumentJob.id == job_id,
+            DocumentJob.user_id == current_user.id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+
+    if job.status in JOB_TERMINAL_STATUSES:
+        return _job_to_response(job)
+
+    job.status = "cancelled"
+    job.error_message = "Cancelled by user."
+    await db.flush()
+    return _job_to_response(job)

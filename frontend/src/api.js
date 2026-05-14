@@ -141,6 +141,13 @@ export async function addDocument(arxivId, pdfUrl = null) {
   return res.json();
 }
 
+export async function cancelDocument(jobId) {
+  const res = await apiFetch(`/documents/cancel/${jobId}`, {
+    method: 'POST',
+  });
+  return res.json();
+}
+
 export async function getDocumentStatus(jobId) {
   const res = await apiFetch(`/documents/status/${jobId}`);
   return res.json();

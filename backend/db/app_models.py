@@ -155,7 +155,7 @@ class DocumentJob(Base):
         String(32),
         nullable=False,
         default="queued",
-        comment="queued | downloading | chunking | embedding | done | failed",
+        comment="queued | downloading | chunking | embedding | done | failed | cancelled",
     )
     error_message = Column(Text, nullable=True)
     chunks_created = Column(Integer, default=0, nullable=False)

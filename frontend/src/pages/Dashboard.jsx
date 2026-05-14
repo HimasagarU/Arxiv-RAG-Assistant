@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { listConversations, createConversation, deleteConversation, listDocuments, addDocument, getDocumentStatus } from '../api';
+import { listConversations, createConversation, deleteConversation, listDocuments, addDocument, cancelDocument, getDocumentStatus } from '../api';
 import ThemeToggle from '../components/ThemeToggle';
 import { PageHeader, PageShell } from '../components/PageShell';
 
@@ -86,10 +86,12 @@ export default function Dashboard() {
         setDocuments((prev) =>
           prev.map((d) => (d.id === jobId ? status : d))
         );
-        if (['done', 'failed'].includes(status.status)) {
+        if (['done', 'failed', 'cancelled'].includes(status.status)) {
+          pollingJobsRef.current.delete(jobId);
           clearInterval(interval);
         }
       } catch {
+        pollingJobsRef.current.delete(jobId);
         clearInterval(interval);
       }
     }, 3000);
@@ -112,6 +114,7 @@ export default function Dashboard() {
     embedding: { label: 'Embedding Vectors...', color: 'var(--color-accent)', icon: '🧬' },
     done: { label: 'Ready', color: 'var(--color-success)', icon: '✅' },
     failed: { label: 'Failed', color: 'var(--color-error)', icon: '❌' },
+    cancelled: { label: 'Cancelled', color: 'var(--color-text-muted)', icon: '⛔' },
   };
 
   return (
@@ -298,7 +301,7 @@ export default function Dashboard() {
                 <div className="space-y-3">
                   {documents.slice((docPage - 1) * ITEMS_PER_PAGE, docPage * ITEMS_PER_PAGE).map((doc, i) => {
                     const cfg = statusConfig[doc.status] || statusConfig.queued;
-                    const isProcessing = !['done', 'failed'].includes(doc.status);
+                    const isProcessing = !['done', 'failed', 'cancelled'].includes(doc.status);
                     return (
                       <div
                         key={doc.id}
@@ -333,6 +336,24 @@ export default function Dashboard() {
                           <p className="text-xs mt-1" style={{ color: 'var(--color-error)' }}>
                             {doc.error_message}
                           </p>
+                        )}
+                        {doc.status === 'cancelled' && doc.error_message && (
+                          <p className="text-xs mt-1" style={{ color: 'var(--color-text-muted)' }}>
+                            {doc.error_message}
+                          </p>
+                        )}
+                        {isProcessing && (
+                          <button
+                            className="btn-soft text-xs mt-2 w-full"
+                            style={{ color: 'var(--color-error)' }}
+                            onClick={async () => {
+                              const updated = await cancelDocument(doc.id);
+                              setDocuments((prev) => prev.map((d) => (d.id === doc.id ? updated : d)));
+                              pollingJobsRef.current.delete(doc.id);
+                            }}
+                          >
+                            Stop ingestion
+                          </button>
                         )}
                         {doc.status === 'done' && (
                           <button
