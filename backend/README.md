@@ -30,6 +30,8 @@ pip install -r requirements.txt
 uvicorn api.app:app --host 0.0.0.0 --port 8000 --reload
 ```
 
+Production Docker images also pre-install the NLTK `punkt` and `punkt_tab` data packages so tokenizer-dependent code works without a runtime download.
+
 ## CLI (offline)
 
 ```bash

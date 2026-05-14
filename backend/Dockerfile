@@ -31,6 +31,9 @@ RUN pip install --user --no-cache-dir --index-url https://download.pytorch.org/w
 	"torch>=2.0.0" "torchvision>=0.15.0" "torchaudio>=2.0.0" \
  && pip install --user --no-cache-dir -r requirements.txt
 
+# Pre-download NLTK tokenizer data needed by production text processing
+RUN python -m nltk.downloader punkt punkt_tab
+
 # Copy application code
 COPY --chown=user api/ api/
 COPY --chown=user ingest/ ingest/
