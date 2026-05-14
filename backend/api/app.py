@@ -1452,7 +1452,7 @@ async def query_stream_endpoint(request: QueryRequest):
                         try:
                             stage = queue.get_nowait()
                             yield f"data: {json.dumps({'type': 'status', 'stage': stage})}\n\n"
-                        except:
+                        except asyncio.QueueEmpty:
                             break
                     break
 
