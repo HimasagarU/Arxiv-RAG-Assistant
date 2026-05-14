@@ -495,6 +495,7 @@ class SourceInfo(BaseModel):
     section_hint: str = "other"
     layer: str = "core"
     rerank_score: float = 0.0
+    relevance_score: float = 0.0
 
 
 class AnalyticsInfo(BaseModel):
@@ -1315,6 +1316,7 @@ async def query_endpoint(
             categories=p.get("categories", ""),
             chunk_text=p["chunk_text"],
             rerank_score=p.get("rerank_score", 0.0),
+            relevance_score=p.get("relevance_score", 0.0),
         )
         for p in passages
     ]
@@ -1402,6 +1404,7 @@ async def query_stream_endpoint(request: QueryRequest):
             "categories": p.get("categories", ""),
             "chunk_text": p["chunk_text"],
             "rerank_score": p.get("rerank_score", 0.0),
+            "relevance_score": p.get("relevance_score", 0.0),
         }
         for p in passages
     ]

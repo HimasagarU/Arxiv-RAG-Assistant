@@ -50,9 +50,9 @@ const SourceItem = memo(function SourceItem({ src, id, expanded, onToggle }) {
         onClick={onToggle}
       >
         [{id}] {src.title}
-        {src.rerank_score > 0 && (
+        {src.rerank_score !== 0 && (
           <span className="ml-2" style={{ color: 'var(--color-text-muted)' }}>
-            (score: {src.rerank_score.toFixed(3)})
+            (reranker score: {src.rerank_score.toFixed(3)})
           </span>
         )}
       </button>

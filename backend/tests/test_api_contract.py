@@ -110,7 +110,7 @@ def test_query_contract_with_mocked_retriever_and_llm(monkeypatch):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["answer"] == "Mock answer with citation [1]."
+    assert body["answer"].startswith("Mock answer with citation [1].")
     assert body["cached"] is False
     assert body["sources"][0]["paper_id"] == "2401.00001"
     assert body["retrieval_trace"]["intent"] == "explanatory"

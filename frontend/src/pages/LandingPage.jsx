@@ -359,8 +359,8 @@ function LandingPage() {
                           <div className="flex items-center gap-3 mt-3 text-xs text-[var(--color-text-muted)] flex-wrap">
                             {source.authors && <span>By {source.authors}</span>}
                             {source.categories && <span className="bg-[var(--color-bg-hover)] px-2 py-0.5 rounded">{source.categories}</span>}
-                            {source.rerank_score > 0 && (
-                              <span className="text-[var(--color-success)] font-medium">Score: {source.rerank_score.toFixed(3)}</span>
+                            {source.rerank_score !== 0 && (
+                              <span className="text-[var(--color-success)] font-medium">Reranker Score: {source.rerank_score.toFixed(3)}</span>
                             )}
                             <a href={`https://arxiv.org/abs/${source.paper_id}`} target="_blank" rel="noopener noreferrer" className="text-[var(--color-accent)] hover:underline ml-auto">
                               View on ArXiv
