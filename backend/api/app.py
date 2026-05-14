@@ -1431,16 +1431,30 @@ async def query_stream_endpoint(request: QueryRequest):
 
     async def event_generator():
         """SSE generator: status updates, then metadata, then tokens, then DONE."""
+        last_ping = time.time()
+        
         # 1. Stream Progress Updates
-        while not retrieval_task.done():
+        while True:
             try:
                 # Wait for a progress update from the retrieval thread
-                stage = await asyncio.wait_for(queue.get(), timeout=0.05)
+                stage = await asyncio.wait_for(queue.get(), timeout=0.1)
                 yield f"data: {json.dumps({'type': 'status', 'stage': stage})}\n\n"
+                last_ping = time.time()
             except asyncio.TimeoutError:
+                # Heartbeat every 15s to keep HF Proxy alive
+                if time.time() - last_ping > 15:
+                    yield ": ping\n\n"
+                    last_ping = time.time()
+                
                 if retrieval_task.done():
+                    # Drain any remaining items in the queue
+                    while not queue.empty():
+                        try:
+                            stage = queue.get_nowait()
+                            yield f"data: {json.dumps({'type': 'status', 'stage': stage})}\n\n"
+                        except:
+                            break
                     break
-                continue
 
         # 2. Get Final Result
         try:
