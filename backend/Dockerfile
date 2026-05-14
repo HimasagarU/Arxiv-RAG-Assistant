@@ -38,6 +38,7 @@ COPY --chown=user storage/ storage/
 COPY --chown=user rerank/ rerank/
 COPY --chown=user index/ index/
 COPY --chown=user db/ db/
+COPY --chown=user utils/ utils/
 
 # Create data directory
 RUN mkdir -p $HOME/app/data

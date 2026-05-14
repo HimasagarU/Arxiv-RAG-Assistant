@@ -10,6 +10,7 @@ The background ingestion task reuses the existing ingest pipeline
 (ingest_arxiv.py) and stores PDFs in Cloudflare R2.
 """
 
+import json
 import logging
 import os
 import sys
@@ -18,6 +19,8 @@ import types
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
+
+import numpy as np
 
 from dotenv import load_dotenv
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status

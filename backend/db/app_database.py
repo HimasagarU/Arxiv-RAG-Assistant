@@ -12,6 +12,8 @@ Now consolidated into Neon to reduce latency and complexity.
 
 import logging
 import os
+import ssl as _ssl
+import urllib.parse as _urlparse
 
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -34,9 +36,6 @@ _raw_url = os.getenv("DATABASE_URL", os.getenv("APP_DATABASE_URL", ""))
 
 if not _raw_url:
     log.error("DATABASE_URL not set. Application database will fail.")
-
-import ssl as _ssl
-import urllib.parse as _urlparse
 
 def _make_async_url(raw: str) -> tuple[str, bool]:
     """

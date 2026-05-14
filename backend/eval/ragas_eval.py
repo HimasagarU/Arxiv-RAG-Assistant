@@ -324,7 +324,8 @@ def print_summary(scored: list[dict]):
         doc_recall_10 = []
         for r in recs:
             gt_paper = r.get("ground_truth_paper_id")
-            if not gt_paper: continue
+            if not gt_paper:
+                continue
             retrieved_papers = [p.get("paper_id") for p in r.get("trace", {}).get("passages", [])]
             doc_recall_5.append(1.0 if gt_paper in retrieved_papers[:5] else 0.0)
             doc_recall_10.append(1.0 if gt_paper in retrieved_papers[:10] else 0.0)

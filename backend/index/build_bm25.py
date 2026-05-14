@@ -20,7 +20,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ingest.chunking import build_contextual_text
 from index.lexical_text import build_lexical_index_text
 from utils.artifact_schema import ARTIFACT_SCHEMA_VERSION, write_artifact_manifest
-from utils.metadata_normalize import normalize_published
 from utils.section_labels import normalize_section_label
 
 logging.basicConfig(
