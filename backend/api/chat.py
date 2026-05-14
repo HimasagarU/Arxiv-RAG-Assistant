@@ -304,22 +304,55 @@ async def chat_query_stream(
         GenerationSurface.DOCUMENT_CHAT if conv.paper_id else GenerationSurface.CHAT
     )
 
+    queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def on_progress(stage: str):
+        loop.call_soon_threadsafe(queue.put_nowait, stage)
+
+    # 1. Run HyDE (if enabled) in thread
+    hyde_inner = await asyncio.to_thread(generate_hyde_excerpt, body.query, intent)
+    
+    rk = dict(retrieve_kwargs)
+    if hyde_inner:
+        rk["dense_auxiliary_text"] = hyde_inner
+    rk["on_progress"] = on_progress
+
+    # 2. Start blocking retrieval task
+    t_start = time.time()
+    retrieval_task = loop.run_in_executor(
+        None,
+        lambda: _state["retriever"].retrieve(body.query, **rk)
+    )
+
     async def event_gen():
+        last_ping = time.time()
         try:
-            yield _sse_event("retrieval_start", {"query": body.query})
-            t0 = time.time()
+            # 1. Stream Progress Updates
+            while True:
+                try:
+                    stage = await asyncio.wait_for(queue.get(), timeout=0.1)
+                    yield _sse_event("status", {"stage": stage})
+                    last_ping = time.time()
+                except asyncio.TimeoutError:
+                    if time.time() - last_ping > 15:
+                        yield ": ping\n\n"
+                        last_ping = time.time()
+                    
+                    if retrieval_task.done():
+                        while not queue.empty():
+                            try:
+                                stage = queue.get_nowait()
+                                yield _sse_event("status", {"stage": stage})
+                            except asyncio.QueueEmpty:
+                                break
+                        break
 
-            rk = dict(retrieve_kwargs)
-            hyde_inner = await asyncio.to_thread(generate_hyde_excerpt, body.query, intent)
-            if hyde_inner:
-                rk["dense_auxiliary_text"] = hyde_inner
-
-            retrieval_result = await asyncio.to_thread(
-                lambda: _state["retriever"].retrieve(body.query, **rk),
-            )
+            # 2. Get Retrieval Result
+            retrieval_result = await retrieval_task
             passages = retrieval_result["passages"]
             trace = retrieval_result["trace"]
-            trace["total_ms"] = round((time.time() - t0) * 1000, 1)
+            trace["total_ms"] = round((time.time() - t_start) * 1000, 1)
 
             yield _sse_event(
                 "retrieval_done",

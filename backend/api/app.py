@@ -76,7 +76,7 @@ def _get_env_int(name: str, default: int) -> int:
         return default
 
 
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 GEMINI_TEMPERATURE = _get_env_float("GEMINI_TEMPERATURE", 0.2)
 GEMINI_MAX_OUTPUT_TOKENS = _get_env_int("GEMINI_MAX_OUTPUT_TOKENS", 8192)
 GEMINI_TOP_P = _get_env_float("GEMINI_TOP_P", 0.9)
@@ -84,7 +84,7 @@ GEMINI_RPM = _get_env_int("GEMINI_RPM", 5)
 GEMINI_RPD = _get_env_int("GEMINI_RPD", 0)
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GROQ_TEMPERATURE = _get_env_float("GROQ_TEMPERATURE", GEMINI_TEMPERATURE)
-GROQ_MAX_OUTPUT_TOKENS = _get_env_int("GROQ_MAX_OUTPUT_TOKENS", 2048)
+GROQ_MAX_OUTPUT_TOKENS = _get_env_int("GROQ_MAX_OUTPUT_TOKENS", 4096)
 GROQ_TOP_P = _get_env_float("GROQ_TOP_P", GEMINI_TOP_P)
 GENERATION_CONTEXT_TOP_N = _get_env_int("GENERATION_CONTEXT_TOP_N", 10)
 
@@ -262,6 +262,7 @@ class GeminiClient:
                     yield text
             except ValueError:
                 # Catch safety or empty text exceptions thrown by the property accessor
+                log.warning("Gemini stream chunk blocked (safety or recitation filter).")
                 pass
 
 

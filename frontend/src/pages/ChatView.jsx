@@ -10,6 +10,15 @@ import { renderMarkdown } from '../utils/renderMarkdown';
 
 const MAX_QUERIES = 20;
 
+const PIPELINE_STEPS = [
+  { id: 'Expanding query',                   label: 'Expanding query variants…'           },
+  { id: 'Hybrid retrieval',                  label: 'Dense & Lexical retrieval…'          },
+  { id: 'Reranking (Cross-Encoder)',         label: 'BGE-Reranker-Base…'                 },
+  { id: 'MMR Diversity Filtering',           label: 'MMR diversity filter…'               },
+  { id: 'Context Compression & Synthesis',   label: 'Compressing context…'                },
+  { id: 'Synthesizing Answer',               label: 'Generating answer with Groq…'        },
+];
+
 // ── Memoized message components ─────────────────────────────
 
 const UserMessage = memo(function UserMessage({ content }) {
@@ -140,17 +149,42 @@ const AssistantMessage = memo(function AssistantMessage({ msg, msgIdx, streaming
           )}
         </div>
 
-        {msg.retrievalStatus && (
-          <div className="mb-3 px-3 py-2 rounded-lg text-xs flex items-center gap-2"
-               style={{ background: 'var(--color-bg-hover)', color: 'var(--color-text-muted)', border: '1px solid var(--color-border)' }}>
-            <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-              msg.retrievalStatus === 'done'
-                ? 'bg-[var(--color-success)]'
-                : 'bg-[var(--color-accent)] animate-pulse'
-            }`} />
-            {msg.retrievalStatus === 'done'
-              ? `Retrieved ${msg.retrievalChunks ?? ''} chunks · reranked`
-              : 'Hybrid retrieval in progress…'}
+        {msg.streaming && (
+          <div className="mb-4 space-y-2">
+            <div className="flex flex-wrap gap-2">
+              {PIPELINE_STEPS.map((step) => {
+                const stepIdx = PIPELINE_STEPS.findIndex(s => s.id === step.id);
+                const currentIdx = PIPELINE_STEPS.findIndex(s => s.id === msg.currentStage);
+                const isDone = currentIdx > stepIdx || msg.retrievalStatus === 'done';
+                const isActive = msg.currentStage === step.id && msg.retrievalStatus !== 'done';
+                
+                if (!isDone && !isActive && stepIdx > (currentIdx >= 0 ? currentIdx + 1 : 0)) return null;
+
+                return (
+                  <div 
+                    key={step.id} 
+                    className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium transition-all border"
+                    style={{ 
+                      background: isDone ? 'rgba(16, 185, 129, 0.1)' : isActive ? 'var(--color-bg-hover)' : 'transparent',
+                      color: isDone ? 'var(--color-success)' : isActive ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                      borderColor: isDone ? 'rgba(16, 185, 129, 0.2)' : isActive ? 'var(--color-accent)' : 'var(--color-border)',
+                      opacity: isDone || isActive ? 1 : 0.5
+                    }}
+                  >
+                    <div className={`w-1.5 h-1.5 rounded-full ${isDone ? 'bg-[var(--color-success)]' : isActive ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-[var(--color-text-muted)]'}`} />
+                    {step.label}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {msg.retrievalStatus === 'done' && !msg.streaming && (
+          <div className="mb-3 px-3 py-1.5 rounded-lg text-[10px] inline-flex items-center gap-2"
+               style={{ background: 'rgba(16, 185, 129, 0.05)', color: 'var(--color-success)', border: '1px solid rgba(16, 185, 129, 0.1)' }}>
+            <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-success)]" />
+            Analysis complete · {msg.retrievalChunks ?? ''} evidence blocks processed
           </div>
         )}
 
@@ -246,6 +280,7 @@ export default function ChatView() {
       sources_json: null,
       id: asstMsgId,
       retrievalStatus: 'searching',
+      currentStage: PIPELINE_STEPS[0].id,
       retrievalChunks: null,
       streaming: true,
     }]);
@@ -264,8 +299,14 @@ export default function ChatView() {
       onRetrievalDone: (payload) => {
         setMessages((prev) => prev.map((m) =>
           m.id === asstMsgId
-            ? { ...m, retrievalStatus: 'done', retrievalChunks: payload.num_chunks }
+            ? { ...m, retrievalStatus: 'done', retrievalChunks: payload.num_chunks, currentStage: null }
             : m
+        ));
+      },
+
+      onStatus: (stage) => {
+        setMessages((prev) => prev.map((m) =>
+          m.id === asstMsgId ? { ...m, currentStage: stage } : m
         ));
       },
 
