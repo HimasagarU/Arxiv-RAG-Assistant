@@ -1626,8 +1626,9 @@ class HybridRetriever:
             # Apply dynamic relative threshold for scientific/grounding-heavy intents
             if reranked and intent in (INTENT_TECHNICAL, INTENT_EXPLANATORY, INTENT_EVIDENCE, INTENT_SOTA):
                 top_score = float(reranked[0].get("rerank_score", 0.0))
-                # Dynamic floor: keep chunks within 70% of the top score, with an absolute floor of 0.2
-                threshold = max(0.2, top_score * 0.7)
+                # Dynamic floor: keep chunks within 70% of the top score, with an absolute floor of 0.2.
+                # Use min() to ensure we never prune the top result itself if it's below the floor.
+                threshold = min(top_score, max(0.2, top_score * 0.7))
                 reranked = [p for p in reranked if float(p.get("rerank_score", 0.0)) >= threshold]
             
             analytics = self.extract_analytics(merged)
