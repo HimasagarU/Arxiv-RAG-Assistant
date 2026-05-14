@@ -1400,42 +1400,80 @@ async def query_stream_endpoint(request: QueryRequest):
     intent = classify_query_intent(request.query)
 
     target_top_n = min(request.top_k, get_context_size(intent))
-    result = _state["retriever"].retrieve(
-        request.query,
-        top_n=target_top_n,
-        category=request.category,
-        author=request.author,
-        start_year=request.start_year,
-        intent=intent,
+    
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+
+    queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def on_progress(stage: str):
+        loop.call_soon_threadsafe(queue.put_nowait, stage)
+
+    # Run synchronous retrieval in a thread pool to allow async progress streaming
+    retrieval_task = loop.run_in_executor(
+        None, 
+        lambda: _state["retriever"].retrieve(
+            request.query,
+            top_n=target_top_n,
+            category=request.category,
+            author=request.author,
+            start_year=request.start_year,
+            intent=intent,
+            on_progress=on_progress
+        )
     )
-    passages = result["passages"]
-    trace = result["trace"]
-    analytics = result.get("analytics", {})
 
-    compressed_context = _state["retriever"].compress_context(
-        request.query, passages, intent=intent
-    )
+    async def event_generator():
+        """SSE generator: status updates, then metadata, then tokens, then DONE."""
+        # 1. Stream Progress Updates
+        while not retrieval_task.done():
+            try:
+                # Wait for a progress update from the retrieval thread
+                stage = await asyncio.wait_for(queue.get(), timeout=0.05)
+                yield f"data: {json.dumps({'type': 'status', 'stage': stage})}\n\n"
+            except asyncio.TimeoutError:
+                if retrieval_task.done():
+                    break
+                continue
 
-    prompt = build_prompt(request.query, compressed_context, passages, intent=intent)
+        # 2. Get Final Result
+        try:
+            result = await retrieval_task
+        except Exception as e:
+            log.error(f"Retrieval failed: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            return
 
-    sources = [
-        {
-            "chunk_id": p["chunk_id"],
-            "paper_id": p["paper_id"],
-            "title": p["title"],
-            "authors": p.get("authors", ""),
-            "categories": p.get("categories", ""),
-            "chunk_text": p["chunk_text"],
-            "rerank_score": p.get("rerank_score", 0.0),
-            "chunk_label": p.get("chunk_label", "general context"),
-        }
-        for p in passages
-    ]
+        passages = result["passages"]
+        trace = result["trace"]
+        analytics = result.get("analytics", {})
+        
+        if intent in (INTENT_TECHNICAL, INTENT_EXPLANATORY, INTENT_EVIDENCE, INTENT_SOTA):
+            yield f"data: {json.dumps({'type': 'status', 'stage': 'Context Compression & Synthesis'})}\n\n"
 
-    retrieval_ms = round((time.time() - t0) * 1000, 1)
+        compressed_context = _state["retriever"].compress_context(
+            request.query, passages, intent=intent
+        )
 
-    def event_generator():
-        """SSE generator: metadata event, then token events, then DONE."""
+        prompt = build_prompt(request.query, compressed_context, passages, intent=intent)
+
+        sources = [
+            {
+                "chunk_id": p["chunk_id"],
+                "paper_id": p["paper_id"],
+                "title": p["title"],
+                "authors": p.get("authors", ""),
+                "categories": p.get("categories", ""),
+                "chunk_text": p["chunk_text"],
+                "rerank_score": p.get("rerank_score", 0.0),
+                "chunk_label": p.get("chunk_label", "general context"),
+            }
+            for p in passages
+        ]
+
+        retrieval_ms = round((time.time() - t0) * 1000, 1)
+        
         meta_payload = json.dumps({
             "type": "metadata",
             "sources": sources,
@@ -1447,6 +1485,7 @@ async def query_stream_endpoint(request: QueryRequest):
         yield f"data: {meta_payload}\n\n"
 
         try:
+            yield f"data: {json.dumps({'type': 'status', 'stage': 'Synthesizing Answer'})}\n\n"
             for token in _generate_answer_stream(
                 prompt,
                 intent=intent,
