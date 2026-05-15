@@ -557,4 +557,10 @@ async def cancel_document(
     job.status = "cancelled"
     job.error_message = "Cancelled by user."
     await db.flush()
+    # Ensure attributes (timestamps) are loaded on the instance before returning
+    try:
+        await db.refresh(job)
+    except Exception:
+        # Best-effort refresh; if it fails, still return the current job state
+        pass
     return _job_to_response(job)
