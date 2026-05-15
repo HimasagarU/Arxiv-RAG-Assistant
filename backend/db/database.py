@@ -159,6 +159,16 @@ class Database:
             cur.execute("SELECT * FROM papers WHERE paper_id = %s", (paper_id,))
             return cur.fetchone()
 
+    def count_chunks_for_paper(self, paper_id: str) -> int:
+        """Return how many chunk rows exist for this paper (Neon)."""
+        with self.conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS cnt FROM chunks WHERE paper_id = %s",
+                (paper_id,),
+            )
+            row = cur.fetchone()
+            return int(row["cnt"]) if row else 0
+
     def paper_exists(self, paper_id: str) -> bool:
         """Check if a paper exists."""
         with self.conn.cursor() as cur:

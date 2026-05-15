@@ -13,6 +13,7 @@ The background ingestion task reuses the existing ingest pipeline
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import types
@@ -32,6 +33,8 @@ from api.auth import get_current_user
 from api.cache import bump_query_cache_buster_sync
 from db.app_database import get_app_db
 from db.app_models import DocumentJob, User
+from utils.ids import chunk_id_to_uuid, normalize_arxiv_paper_id, paper_id_to_uuid
+from utils.metadata_normalize import normalize_published
 from utils.section_labels import normalize_section_label
 
 load_dotenv()
@@ -121,9 +124,86 @@ def _is_cancelled(job_id: str) -> bool:
     return _get_job_status(job_id) == "cancelled"
 
 
-# ---------------------------------------------------------------------------
-# Background ingestion task
-# ---------------------------------------------------------------------------
+def _wait_for_retriever(timeout_s: float = 180.0, poll_s: float = 2.0):
+    """Wait until global HybridRetriever is ready (embed_model + Qdrant client)."""
+    import time as time_mod
+
+    from api.app import _state
+
+    deadline = time_mod.time() + timeout_s
+    while time_mod.time() < deadline:
+        r = _state.get("retriever")
+        if r is not None and getattr(r, "embed_model", None) and getattr(r, "qdrant_client", None):
+            return r
+        time_mod.sleep(poll_s)
+    return None
+
+
+def _qdrant_has_paper_chunks(qdrant_client, collection: str, paper_id: str) -> bool:
+    """Return True if at least one point exists for this paper_id in the collection."""
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    try:
+        flt = Filter(must=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))])
+        pts, _ = qdrant_client.scroll(
+            collection_name=collection,
+            scroll_filter=flt,
+            limit=1,
+            with_payload=False,
+            with_vectors=False,
+        )
+        return bool(pts)
+    except Exception as exc:
+        log.warning("Qdrant scroll check failed for %s: %s", paper_id, exc)
+        return False
+
+
+def _standalone_embed_and_qdrant():
+    """Build SentenceTransformer + Qdrant when the global retriever is not yet initialized."""
+    import torch
+    from qdrant_client import QdrantClient
+    from sentence_transformers import SentenceTransformer
+
+    from utils.runtime import resolve_embedding_model
+
+    url = (os.getenv("QDRANT_URL") or "").strip()
+    if not url:
+        return None, None
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = SentenceTransformer(resolve_embedding_model(), device=device)
+    client = QdrantClient(url=url, api_key=os.getenv("QDRANT_API_KEY"))
+    return model, client
+
+
+def _rebuild_bm25_safe():
+    """Rebuild BM25 artifacts from ``chunks.jsonl`` (same as CLI ``index.build_bm25``)."""
+    import importlib
+
+    try:
+        mod = importlib.import_module("index.build_bm25")
+        mod.main()
+        log.info("[Ingest] BM25 artifact rebuild finished.")
+    except Exception as e:
+        log.error("[Ingest] BM25 rebuild failed: %s", e)
+        raise
+
+
+def _hot_reload_bm25_into_retriever():
+    try:
+        from api.app import _state
+
+        r = _state.get("retriever")
+        if not r:
+            return
+        import joblib
+
+        bm25_path = Path(os.getenv("DATA_DIR", "data")) / "bm25_v1.pkl"
+        if bm25_path.is_file():
+            r.bm25 = joblib.load(bm25_path)
+            r.bm25_dirty = False
+            log.info("[Ingest] Hot-reloaded BM25 from %s", bm25_path)
+    except Exception as ex:
+        log.warning("[Ingest] BM25 hot-reload skipped: %s", ex)
 
 def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
     """
@@ -138,6 +218,11 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
 
     import psycopg
     from psycopg.rows import dict_row
+
+    arxiv_id = normalize_arxiv_paper_id(arxiv_id)
+    if not arxiv_id or not re.match(r"^\d{4}\.\d{4,5}$", arxiv_id):
+        log.error("[Ingest] Invalid arXiv id after normalization: %s", arxiv_id)
+        return
 
     app_db_url = os.getenv("APP_DATABASE_URL", "")
     if not app_db_url:
@@ -196,6 +281,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         authors = ", ".join(a.get("name", "") for a in entry.get("authors", []))
         categories = ", ".join(t.get("term", "") for t in entry.get("tags", []))
         published_raw = entry.get("published") or entry.get("updated") or ""
+        published_iso = normalize_published(published_raw)
 
         if _is_cancelled(job_id):
             log.info(f"[Ingest] Job {job_id} cancelled after metadata fetch.")
@@ -209,6 +295,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             return
 
         pdf_bytes = pdf_resp.content
+        if not pdf_bytes or len(pdf_bytes) < 1024:
+            _update_job("failed", error="PDF download returned empty or trivially small body.")
+            return
+
         _update_job("downloading", title=paper_title)
 
         if _is_cancelled(job_id):
@@ -254,7 +344,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             "categories": categories,
             "full_text": full_text,
             "abstract": abstract,
-            "published": published_raw,
+            "published": published_iso or published_raw,
             "layer": "core",
         }
         chunks = chunk_paper(paper_dict, tokenizer)
@@ -277,9 +367,10 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             log.info(f"[Ingest] Job {job_id} cancelled before persistence.")
             return
 
-        # Store paper in Neon DB
+        # Store paper in Neon DB (corpus)
         from db.database import get_db
         db = get_db()
+        db.run_migrations()
         db.upsert_paper({
             "paper_id": arxiv_id,
             "title": paper_title,
@@ -287,21 +378,26 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             "authors": authors,
             "categories": categories,
             "pdf_url": actual_pdf_url,
-            "full_text": "",  # Stop storing massive full text in Neon
+            "published": published_iso,
+            "updated": None,
+            "full_text": "",
             "download_status": "downloaded",
             "parse_status": "parsed",
             "is_seed": False,
             "layer": "core",
             "source": "user_upload",
         })
+        for ch in chunks:
+            db.insert_chunk(ch)
         db.commit()
 
         # Persist chunks locally for offline rebuilds
         try:
             chunks_path = Path(os.getenv("DATA_DIR", "data")) / "chunks.jsonl"
+            chunks_path.parent.mkdir(parents=True, exist_ok=True)
             with open(chunks_path, "a", encoding="utf-8") as f:
                 for chunk in chunks:
-                    f.write(json.dumps(chunk) + "\n")
+                    f.write(json.dumps(chunk, default=str) + "\n")
             log.info(f"[Ingest] Appended {len(chunks)} chunks to {chunks_path}")
         except Exception as e:
             log.error(f"[Ingest] Failed to append chunks to offline JSONL: {e}")
@@ -310,38 +406,63 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
             log.info(f"[Ingest] Job {job_id} cancelled after local persistence.")
             return
 
-        # Embed and upsert to Qdrant
+        # Embed and upsert to Qdrant (wait for retriever or use standalone clients)
+        from api.retrieval import COLLECTION_TEXT, COLLECTION_DOCS
+        from index.build_qdrant import _chunk_embedding_text, _paper_core_embedding_text
+        from qdrant_client.models import PointStruct
+
+        retriever = _wait_for_retriever(timeout_s=float(os.getenv("INGEST_RETRIEVER_WAIT_S", "180")))
+        embed_model = None
+        qdrant_client = None
+        collections_for_docs = set()
+
+        if retriever is not None:
+            embed_model = retriever.embed_model
+            qdrant_client = retriever.qdrant_client
+            collections_for_docs = set(retriever.collections.keys()) if retriever.collections else set()
+            log.info("[Ingest] Using global HybridRetriever for embedding/Qdrant.")
+        else:
+            log.warning("[Ingest] Retriever not ready after wait; loading standalone embedder for this job.")
+            embed_model, qdrant_client = _standalone_embed_and_qdrant()
+            if embed_model is None or qdrant_client is None:
+                _update_job(
+                    "failed",
+                    error="QDRANT_URL not set or retriever never became ready; cannot embed. "
+                    "Ensure the API finished loading indexes and Qdrant is configured.",
+                )
+                return
+            try:
+                cols = qdrant_client.get_collections().collections
+                collections_for_docs = {c.name for c in cols}
+            except Exception:
+                collections_for_docs = set()
+
+        qdrant_ok = False
         try:
-            from api.app import _state
-            if _state["retriever"] is not None:
-                retriever = _state["retriever"]
-                from qdrant_client.models import PointStruct
-                from utils.ids import chunk_id_to_uuid
+            texts = [_chunk_embedding_text(c) for c in chunks]
 
-                texts = [c.get("contextual_text", c["chunk_text"]) for c in chunks]
-                
-                # Streaming batch loop to prevent OOM on large papers
-                INGEST_EMBED_BATCH_SIZE = int(os.getenv("INGEST_EMBED_BATCH_SIZE", "32"))
-                all_embeddings = []
-                log.info(f"[Ingest] Embedding {len(texts)} chunks in batches of {INGEST_EMBED_BATCH_SIZE}...")
-                
-                for i in range(0, len(texts), INGEST_EMBED_BATCH_SIZE):
-                    batch_texts = texts[i : i + INGEST_EMBED_BATCH_SIZE]
-                    batch_embs = retriever.embed_model.encode(
-                        batch_texts, 
-                        batch_size=INGEST_EMBED_BATCH_SIZE,
-                        convert_to_numpy=True,
-                        normalize_embeddings=True,
-                    )
-                    all_embeddings.append(batch_embs)
-                
-                embeddings = np.vstack(all_embeddings)
+            INGEST_EMBED_BATCH_SIZE = int(os.getenv("INGEST_EMBED_BATCH_SIZE", "32"))
+            all_embeddings = []
+            log.info(f"[Ingest] Embedding {len(texts)} chunks in batches of {INGEST_EMBED_BATCH_SIZE}...")
 
-                points = []
-                for i, chunk in enumerate(chunks):
-                    point_id = chunk_id_to_uuid(chunk["chunk_id"])
-                    sec = normalize_section_label(chunk.get("section_hint", "other"))
-                    points.append(PointStruct(
+            for i in range(0, len(texts), INGEST_EMBED_BATCH_SIZE):
+                batch_texts = texts[i : i + INGEST_EMBED_BATCH_SIZE]
+                batch_embs = embed_model.encode(
+                    batch_texts,
+                    batch_size=INGEST_EMBED_BATCH_SIZE,
+                    convert_to_numpy=True,
+                    normalize_embeddings=True,
+                )
+                all_embeddings.append(batch_embs)
+
+            embeddings = np.vstack(all_embeddings)
+
+            points = []
+            for i, chunk in enumerate(chunks):
+                point_id = chunk_id_to_uuid(chunk["chunk_id"])
+                sec = normalize_section_label(chunk.get("section_hint", "other"))
+                points.append(
+                    PointStruct(
                         id=point_id,
                         vector=embeddings[i].tolist(),
                         payload={
@@ -361,58 +482,81 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
                             "total_chunks": chunk.get("total_chunks", 1),
                             "chunk_source": chunk.get("chunk_source", "full_text"),
                         },
-                    ))
-
-                # Batch upsert to Qdrant
-                from api.retrieval import COLLECTION_TEXT
-                batch_size = 100
-                for j in range(0, len(points), batch_size):
-                    retriever.qdrant_client.upsert(
-                        collection_name=COLLECTION_TEXT,
-                        points=points[j:j + batch_size],
                     )
+                )
 
-                log.info(f"[Ingest] Upserted {len(points)} vectors to Qdrant for {arxiv_id}")
-                
-                # Update in-memory metadata and BM25 index
-                retriever.add_paper(paper_dict, chunks)
-                log.info(f"[Ingest] Updated in-memory HybridRetriever (BM25 + metadata) for {arxiv_id}")
+            batch_size = 100
+            for j in range(0, len(points), batch_size):
+                qdrant_client.upsert(
+                    collection_name=COLLECTION_TEXT,
+                    points=points[j : j + batch_size],
+                )
+
+            log.info(f"[Ingest] Upserted {len(points)} vectors to Qdrant collection {COLLECTION_TEXT}")
+            qdrant_ok = True
+
+            # Parent–child: one vector per paper in arxiv_docs when collection exists
+            if COLLECTION_DOCS in collections_for_docs:
+                try:
+                    doc_text = _paper_core_embedding_text(chunks)
+                    if doc_text.strip():
+                        demb = embed_model.encode(
+                            [doc_text],
+                            batch_size=1,
+                            convert_to_numpy=True,
+                            normalize_embeddings=True,
+                        )
+                        doc_vec = demb[0].tolist()
+                        doc_point = PointStruct(
+                            id=paper_id_to_uuid(arxiv_id),
+                            vector=doc_vec,
+                            payload={
+                                "paper_id": arxiv_id,
+                                "title": (paper_title or "")[:500],
+                                "authors": (authors or "")[:300],
+                                "categories": categories or "",
+                                "layer": "core",
+                                "chunk_count": len(chunks),
+                                "abstract": (abstract or "")[:4000],
+                            },
+                        )
+                        qdrant_client.upsert(collection_name=COLLECTION_DOCS, points=[doc_point])
+                        log.info("[Ingest] Upserted parent vector into %s", COLLECTION_DOCS)
+                except Exception as doc_exc:
+                    log.warning("[Ingest] arxiv_docs upsert skipped: %s", doc_exc)
+
         except Exception as e:
-            log.warning(f"Qdrant/BM25 update failed (non-fatal): {e}")
+            log.exception("[Ingest] Qdrant upsert failed: %s", e)
+            _update_job("failed", error=f"Vector store update failed: {str(e)[:500]}")
+            return
+
+        if not qdrant_ok:
+            _update_job("failed", error="No vectors were written to Qdrant.")
+            return
+
+        # Update in-memory HybridRetriever metadata + BM25 alignment (when available)
+        try:
+            from api.app import _state
+            if _state.get("retriever") is not None:
+                _state["retriever"].add_paper(paper_dict, chunks)
+                log.info("[Ingest] Updated in-memory HybridRetriever metadata for %s", arxiv_id)
+        except Exception as e:
+            log.warning("[Ingest] In-memory retriever update failed (non-fatal): %s", e)
 
         if _is_cancelled(job_id):
             log.info(f"[Ingest] Job {job_id} cancelled after vector store updates.")
             return
 
-        if _is_cancelled(job_id):
-            log.info(f"[Ingest] Job {job_id} cancelled before completion.")
-            return
-
-        # Stage 4: Done
         _update_job("done", title=paper_title, chunks=len(chunks))
         log.info(f"[Ingest] Paper {arxiv_id} ingestion complete ({len(chunks)} chunks).")
         bump_query_cache_buster_sync()
 
-        # Trigger background BM25 artifact rebuild
         def _rebuild_bm25():
-            log.info("[Ingest] Triggering offline BM25 artifact rebuild for new document...")
             try:
-                from index import build_bm25
-                build_bm25.main()
-                log.info("[Ingest] BM25 artifact rebuild successful.")
-                # We can hot-reload the retriever's BM25 index from disk
-                try:
-                    from api.app import _state
-                    if _state.get("retriever"):
-                        import joblib
-                        bm25_path = Path(os.getenv("DATA_DIR", "data")) / "bm25_v1.pkl"
-                        _state["retriever"].bm25 = joblib.load(bm25_path)
-                        _state["retriever"].bm25_dirty = False
-                        log.info("[Ingest] Hot-reloaded BM25Okapi index into live Retriever.")
-                except Exception as ex:
-                    log.warning(f"Failed to hot-reload BM25 index: {ex}")
-            except Exception as e:
-                log.error(f"[Ingest] Failed to rebuild BM25 artifacts: {e}")
+                _rebuild_bm25_safe()
+                _hot_reload_bm25_into_retriever()
+            except Exception:
+                pass
 
         threading.Thread(target=_rebuild_bm25, daemon=True).start()
 
@@ -433,54 +577,75 @@ async def add_document(
     db: AsyncSession = Depends(get_app_db),
 ):
     """Submit a paper for async ingestion. Returns a job ID for status polling."""
-    # Check if paper already exists in the corpus
+    canonical = normalize_arxiv_paper_id(body.arxiv_id)
+    if not canonical or not re.match(r"^\d{4}\.\d{4,5}$", canonical):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid ArXiv paper id. Use the form YYYY.NNNNN (e.g. 2301.12345).",
+        )
+
+    # Skip ingestion only when corpus already has chunks in Postgres and (if Qdrant is configured) vectors exist.
     try:
-        existing_title = None
         from api.app import _state
-        if _state.get("retriever") and _state["retriever"].papers_meta.get(body.arxiv_id):
-            existing_title = _state["retriever"].papers_meta[body.arxiv_id].get('title', 'Untitled')
-        else:
-            from db.database import get_db
-            neon_db = get_db()
-            existing_paper = neon_db.get_paper(body.arxiv_id)
-            neon_db.close()
-            if existing_paper:
-                existing_title = existing_paper.get('title', 'Untitled')
-                
-        if existing_title:
-            # Paper already in corpus, bypass ingestion and return instantly
-            job = DocumentJob(
-                user_id=current_user.id,
-                arxiv_id=body.arxiv_id,
-                pdf_url=body.pdf_url,
-                status="done",
-                title=existing_title,
-                chunks_created=0,
+        from api.retrieval import COLLECTION_TEXT
+        from db.database import get_db
+
+        neon_db = get_db()
+        chunk_count = neon_db.count_chunks_for_paper(canonical)
+        retriever = _state.get("retriever")
+        qdrant_configured = bool((os.getenv("QDRANT_URL") or "").strip())
+        has_vectors = False
+        if qdrant_configured and retriever and getattr(retriever, "qdrant_client", None):
+            has_vectors = _qdrant_has_paper_chunks(
+                retriever.qdrant_client, COLLECTION_TEXT, canonical
             )
-            db.add(job)
-            await db.flush()
-            log.info(f"Document already in corpus, bypassing ingestion: {body.arxiv_id}")
-            return _job_to_response(job)
+        elif qdrant_configured and not retriever:
+            # Server still booting — do not claim "already indexed"
+            has_vectors = False
+
+        if chunk_count > 0 and (not qdrant_configured or has_vectors):
+            existing_title = None
+            if retriever and retriever.papers_meta.get(canonical):
+                existing_title = retriever.papers_meta[canonical].get("title", "Untitled")
+            else:
+                row = neon_db.get_paper(canonical)
+                if row:
+                    existing_title = row.get("title", "Untitled")
+            if existing_title:
+                job = DocumentJob(
+                    user_id=current_user.id,
+                    arxiv_id=canonical,
+                    pdf_url=body.pdf_url,
+                    status="done",
+                    title=existing_title,
+                    chunks_created=chunk_count,
+                )
+                db.add(job)
+                await db.flush()
+                log.info("Document already indexed; skipping ingestion: %s", canonical)
+                return _job_to_response(job)
+    except HTTPException:
+        raise
     except Exception as e:
-        log.warning(f"Could not check for existing paper: {e}")
+        log.warning("Could not check for existing indexed paper: %s", e)
 
     # Check for duplicate in-progress jobs (app DB)
     existing = await db.execute(
         select(DocumentJob).where(
             DocumentJob.user_id == current_user.id,
-            DocumentJob.arxiv_id == body.arxiv_id,
+            DocumentJob.arxiv_id == canonical,
             DocumentJob.status.in_(list(JOB_ACTIVE_STATUSES)),
         )
     )
     if existing.scalar_one_or_none():
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Paper {body.arxiv_id} is already being processed.",
+            detail=f"Paper {canonical} is already being processed.",
         )
 
     job = DocumentJob(
         user_id=current_user.id,
-        arxiv_id=body.arxiv_id,
+        arxiv_id=canonical,
         pdf_url=body.pdf_url,
     )
     db.add(job)
@@ -490,12 +655,12 @@ async def add_document(
     # true async background tasks well)
     thread = threading.Thread(
         target=_run_ingestion,
-        args=(str(job.id), body.arxiv_id, body.pdf_url),
+        args=(str(job.id), canonical, body.pdf_url),
         daemon=True,
     )
     thread.start()
 
-    log.info(f"Document ingestion queued: {body.arxiv_id} (job={job.id})")
+    log.info(f"Document ingestion queued: {canonical} (job={job.id})")
     return _job_to_response(job)
 
 

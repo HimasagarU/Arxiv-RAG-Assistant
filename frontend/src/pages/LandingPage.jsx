@@ -79,6 +79,20 @@ function LandingPage() {
       onMetadata: (meta) => {
         metaReceived = true;
         setSources(meta.sources || []);
+        // Incorporate retrieval trace (if present) so we can show reranker/MMR stages
+        const trace = meta.retrieval_trace || meta.trace || {};
+        if (trace) {
+          // Rerank
+          const rerank = trace.rerank || {};
+          if (!rerank.skipped) updateProgress('Reranking (Cross-Encoder)');
+          // MMR
+          const mmr = trace.mmr || {};
+          if (mmr.enabled) updateProgress('MMR Diversity Filtering');
+          // Context compression indicator (best-effort)
+          if (trace.retrieval_ms !== undefined) {
+            updateProgress('Context Compression & Synthesis');
+          }
+        }
         // Advance to final stage when metadata arrives if not already there
         updateProgress('Synthesizing Answer');
         setStreaming(true);

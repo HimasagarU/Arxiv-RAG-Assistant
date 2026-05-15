@@ -297,9 +297,34 @@ export default function ChatView() {
       },
 
       onRetrievalDone: (payload) => {
+        // If retrieval trace exists, synthesize progress stages from it
+        const trace = payload.trace || payload.retrieval_trace || {};
+        // Apply retrieval trace to the message progress stages so UI reflects what ran
+        const trace = payload.trace || {};
         setMessages((prev) => prev.map((m) =>
           m.id === asstMsgId
-            ? { ...m, retrievalStatus: 'done', retrievalChunks: payload.num_chunks, currentStage: null }
+            ? {
+                ...m,
+                retrievalStatus: 'done',
+                retrievalChunks: payload.num_chunks,
+                currentStage: null,
+                progressStages: (() => {
+                  const prevStages = m.progressStages || [];
+                  const next = [...prevStages];
+                  try {
+                    const rerank = trace.rerank || {};
+                    if (rerank.skipped !== true && !next.includes('Reranking (Cross-Encoder)')) next.push('Reranking (Cross-Encoder)');
+                  } catch (e) {}
+                  try {
+                    const mmr = trace.mmr || {};
+                    if (mmr.enabled && !next.includes('MMR Diversity Filtering')) next.push('MMR Diversity Filtering');
+                  } catch (e) {}
+                  try {
+                    if (trace.retrieval_ms !== undefined && !next.includes('Context Compression & Synthesis')) next.push('Context Compression & Synthesis');
+                  } catch (e) {}
+                  return next;
+                })(),
+              }
             : m
         ));
       },

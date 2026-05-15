@@ -20,6 +20,7 @@ Features:
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Optional
 from uuid import UUID
@@ -41,6 +42,7 @@ from api.cache import (
 )
 from db.app_database import get_app_db
 from db.app_models import Conversation, Message, User
+from utils.ids import normalize_arxiv_paper_id
 
 load_dotenv()
 
@@ -146,10 +148,18 @@ async def create_conversation(
     db: AsyncSession = Depends(get_app_db),
 ):
     """Create a new conversation (optionally scoped to a paper)."""
+    paper_id = None
+    if body.paper_id and str(body.paper_id).strip():
+        paper_id = normalize_arxiv_paper_id(body.paper_id)
+        if not paper_id or not re.match(r"^\d{4}\.\d{4,5}$", paper_id):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid paper_id. Use an ArXiv id like 2301.12345.",
+            )
     conv = Conversation(
         user_id=current_user.id,
         title=body.title,
-        paper_id=body.paper_id,
+        paper_id=paper_id,
     )
     db.add(conv)
     await db.flush()
