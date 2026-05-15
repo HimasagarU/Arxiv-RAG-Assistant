@@ -297,10 +297,8 @@ export default function ChatView() {
       },
 
       onRetrievalDone: (payload) => {
-        // If retrieval trace exists, synthesize progress stages from it
-        const trace = payload.trace || payload.retrieval_trace || {};
         // Apply retrieval trace to the message progress stages so UI reflects what ran
-        const trace = payload.trace || {};
+        const trace = payload.trace || payload.retrieval_trace || {};
         setMessages((prev) => prev.map((m) =>
           m.id === asstMsgId
             ? {
@@ -311,17 +309,29 @@ export default function ChatView() {
                 progressStages: (() => {
                   const prevStages = m.progressStages || [];
                   const next = [...prevStages];
+                  const addStage = (stage) => {
+                    if (!next.includes(stage)) next.push(stage);
+                  };
+                  try {
+                    if (next.length === 0) {
+                      addStage('Classifying intent');
+                      if ((trace.query_variants || []).length > 1) addStage('Expanding query');
+                      addStage('Dense vector search');
+                      if (trace.parent_child?.active) addStage('Parent document expansion');
+                      addStage('BM25 keyword search');
+                      addStage('RRF fusion and filtering');
+                    }
+                  } catch (e) {}
                   try {
                     const rerank = trace.rerank || {};
-                    if (rerank.skipped !== true && !next.includes('Reranking (Cross-Encoder)')) next.push('Reranking (Cross-Encoder)');
+                    if (rerank.skipped === true) addStage('Reranking skipped');
+                    else addStage('Reranking (Cross-Encoder)');
                   } catch (e) {}
                   try {
                     const mmr = trace.mmr || {};
-                    if (mmr.enabled && !next.includes('MMR Diversity Filtering')) next.push('MMR Diversity Filtering');
+                    if (mmr.enabled) addStage('MMR Diversity Filtering');
                   } catch (e) {}
-                  try {
-                    if (trace.retrieval_ms !== undefined && !next.includes('Context Compression & Synthesis')) next.push('Context Compression & Synthesis');
-                  } catch (e) {}
+                  addStage('Context Compression & Synthesis');
                   return next;
                 })(),
               }

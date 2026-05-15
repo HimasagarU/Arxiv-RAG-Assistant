@@ -111,7 +111,18 @@ class Reranker:
             else:
                 pairs.append([query, p.get("retrieval_text", p.get(text_key, ""))])
 
-        scores = self.ranker.predict(pairs, batch_size=self.batch_size, activation_fn=None)
+        log.info(
+            "Reranking %s candidate passages with %s (batch_size=%s).",
+            len(pairs),
+            self.model_name,
+            self.batch_size,
+        )
+        scores = self.ranker.predict(
+            pairs,
+            batch_size=self.batch_size,
+            activation_fn=None,
+            show_progress_bar=False,
+        )
 
         # Map scores back to the rerank pool
         for i, p in enumerate(rerank_pool):
@@ -125,4 +136,5 @@ class Reranker:
             "pool_size": len(rerank_pool),
             "rerank_text_mode": rerank_text_mode,
         }
+        log.info("Reranking complete; selected top %s passages.", len(reranked[:top_n]))
         return reranked[:top_n]

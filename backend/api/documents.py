@@ -17,6 +17,7 @@ import re
 import sys
 import threading
 import types
+import time
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
@@ -45,6 +46,7 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 
 JOB_ACTIVE_STATUSES = frozenset({"queued", "downloading", "chunking", "embedding"})
 JOB_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
+ARXIV_EXPORT_API = "https://export.arxiv.org/api/query"
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +207,162 @@ def _hot_reload_bm25_into_retriever():
     except Exception as ex:
         log.warning("[Ingest] BM25 hot-reload skipped: %s", ex)
 
+
+def _fetch_arxiv_metadata(arxiv_id: str) -> dict:
+    """Fetch paper metadata from arXiv with useful failure diagnostics."""
+    import feedparser
+    import requests
+
+    params = {"id_list": arxiv_id}
+    last_error = ""
+    for attempt in range(1, 4):
+        try:
+            resp = requests.get(
+                ARXIV_EXPORT_API,
+                params=params,
+                timeout=30,
+                headers={"User-Agent": "ArxivRagAssistant/1.0 (paper ingestion)"},
+            )
+            if resp.status_code == 429 and attempt < 3:
+                wait_s = 5 * attempt
+                log.warning(
+                    "[Ingest] arXiv metadata rate limited for %s; retrying in %ss",
+                    arxiv_id,
+                    wait_s,
+                )
+                time.sleep(wait_s)
+                continue
+            if resp.status_code != 200:
+                last_error = f"arXiv metadata HTTP {resp.status_code}"
+                log.warning("[Ingest] %s for %s", last_error, arxiv_id)
+                continue
+
+            feed = feedparser.parse(resp.text)
+            if feed.bozo:
+                bozo_msg = str(getattr(feed, "bozo_exception", ""))[:200]
+                if bozo_msg:
+                    log.warning("[Ingest] arXiv feed parse warning for %s: %s", arxiv_id, bozo_msg)
+
+            entries = getattr(feed, "entries", []) or []
+            if entries:
+                entry = entries[0]
+                entry_id = (entry.get("id") or "").lower()
+                if arxiv_id in entry_id:
+                    return {
+                        "title": entry.get("title", "").replace("\n", " ").strip(),
+                        "abstract": entry.get("summary", "").strip(),
+                        "authors": ", ".join(a.get("name", "") for a in entry.get("authors", [])),
+                        "categories": ", ".join(t.get("term", "") for t in entry.get("tags", [])),
+                        "published_raw": entry.get("published") or entry.get("updated") or "",
+                    }
+                last_error = f"arXiv returned a different entry ({entry_id or 'missing id'})"
+            else:
+                last_error = "arXiv metadata feed returned no entries"
+        except requests.exceptions.Timeout:
+            last_error = "arXiv metadata request timed out"
+            log.warning("[Ingest] %s for %s", last_error, arxiv_id)
+        except Exception as exc:
+            last_error = f"arXiv metadata request failed: {exc}"
+            log.warning("[Ingest] %s", last_error)
+
+    # Last-resort metadata from the abs page. This avoids false "not found" reports
+    # when the export API lags or is blocked by a proxy, while still failing clearly.
+    try:
+        abs_url = f"https://arxiv.org/abs/{arxiv_id}"
+        resp = requests.get(
+            abs_url,
+            timeout=30,
+            headers={"User-Agent": "ArxivRagAssistant/1.0 (paper ingestion)"},
+        )
+        if resp.status_code == 200 and f"arXiv:{arxiv_id}" in resp.text:
+            title_match = re.search(r"<h1[^>]*class=\"title[^>]*>\s*<span[^>]*>Title:</span>\s*(.*?)</h1>", resp.text, re.S)
+            abstract_match = re.search(r"<blockquote[^>]*class=\"abstract[^>]*>\s*<span[^>]*>Abstract:</span>\s*(.*?)</blockquote>", resp.text, re.S)
+            authors_match = re.search(r"<div[^>]*class=\"authors[^>]*>\s*<span[^>]*>Authors:</span>\s*(.*?)</div>", resp.text, re.S)
+            cats_match = re.search(r"<td[^>]*class=\"tablecell subjects\"[^>]*>\s*(.*?)</td>", resp.text, re.S)
+
+            def _clean_html(value: str) -> str:
+                value = re.sub(r"<[^>]+>", " ", value or "")
+                value = re.sub(r"\s+", " ", value)
+                return value.strip()
+
+            return {
+                "title": _clean_html(title_match.group(1)) if title_match else arxiv_id,
+                "abstract": _clean_html(abstract_match.group(1)) if abstract_match else "",
+                "authors": _clean_html(authors_match.group(1)) if authors_match else "",
+                "categories": _clean_html(cats_match.group(1)) if cats_match else "",
+                "published_raw": "",
+            }
+        if resp.status_code == 404:
+            raise ValueError(f"Paper {arxiv_id} was not found on arXiv abs page.")
+        last_error = f"{last_error}; abs page HTTP {resp.status_code}"
+    except ValueError:
+        raise
+    except Exception as exc:
+        last_error = f"{last_error}; abs page fallback failed: {exc}"
+
+    raise RuntimeError(last_error or f"Could not fetch arXiv metadata for {arxiv_id}")
+
+
+def _download_arxiv_pdf(arxiv_id: str, pdf_url: Optional[str], year: Optional[str] = None) -> tuple[bytes, str]:
+    import requests
+
+    try:
+        from storage.local_pdf_store import LocalPDFStore
+
+        local_store = LocalPDFStore()
+        local_path = local_store.download_pdf(
+            arxiv_id,
+            pdf_url or f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+            year=year,
+            timeout=int(os.getenv("PDF_TIMEOUT", "60")),
+        )
+        if local_path:
+            cached = Path(local_path).read_bytes()
+            if cached and len(cached) >= 1024:
+                log.info("[Ingest] Using local PDF cache for %s: %s", arxiv_id, local_path)
+                return cached, pdf_url or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+    except Exception as exc:
+        log.warning("[Ingest] Local PDF store path failed for %s; direct download fallback: %s", arxiv_id, exc)
+
+    candidates = []
+    if pdf_url:
+        candidates.append(pdf_url)
+    candidates.extend([
+        f"https://arxiv.org/pdf/{arxiv_id}.pdf",
+        f"https://arxiv.org/pdf/{arxiv_id}",
+    ])
+
+    seen = set()
+    last_error = ""
+    for url in candidates:
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        try:
+            log.info("[Ingest] Downloading PDF for %s from %s", arxiv_id, url)
+            resp = requests.get(
+                url,
+                timeout=120,
+                headers={"User-Agent": "ArxivRagAssistant/1.0 (paper ingestion)"},
+            )
+            content_type = (resp.headers.get("content-type") or "").lower()
+            if resp.status_code == 200 and len(resp.content or b"") >= 1024:
+                if "pdf" not in content_type and not resp.content.startswith(b"%PDF"):
+                    last_error = f"download from {url} was not a PDF ({content_type or 'unknown content type'})"
+                    log.warning("[Ingest] %s", last_error)
+                    continue
+                return resp.content, url
+            last_error = f"PDF download failed from {url} (HTTP {resp.status_code}, {len(resp.content or b'')} bytes)"
+            log.warning("[Ingest] %s", last_error)
+        except requests.exceptions.Timeout:
+            last_error = f"PDF download timed out from {url}"
+            log.warning("[Ingest] %s", last_error)
+        except Exception as exc:
+            last_error = f"PDF download failed from {url}: {exc}"
+            log.warning("[Ingest] %s", last_error)
+
+    raise RuntimeError(last_error or f"Could not download PDF for {arxiv_id}")
+
 def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
     """
     Background thread: downloads, chunks, embeds a paper.
@@ -263,40 +421,33 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         _update_job("downloading")
         log.info(f"[Ingest] Downloading paper {arxiv_id}...")
 
-        import requests
-        import feedparser
-
-        # Fetch metadata from ArXiv API
-        api_url = f"http://export.arxiv.org/api/query?id_list={arxiv_id}"
-        resp = requests.get(api_url, timeout=30)
-        feed = feedparser.parse(resp.text)
-
-        if not feed.entries:
-            _update_job("failed", error="Paper not found on ArXiv.")
+        # Fetch metadata from ArXiv API. Use HTTPS; some hosted proxies block plain HTTP
+        # and an empty/blocked response used to be mislabeled as "not found".
+        try:
+            metadata = _fetch_arxiv_metadata(arxiv_id)
+        except ValueError as exc:
+            _update_job("failed", error=str(exc))
+            return
+        except Exception as exc:
+            _update_job("failed", error=f"Could not fetch arXiv metadata: {str(exc)[:400]}")
             return
 
-        entry = feed.entries[0]
-        paper_title = entry.get("title", "").replace("\n", " ").strip()
-        abstract = entry.get("summary", "").strip()
-        authors = ", ".join(a.get("name", "") for a in entry.get("authors", []))
-        categories = ", ".join(t.get("term", "") for t in entry.get("tags", []))
-        published_raw = entry.get("published") or entry.get("updated") or ""
+        paper_title = metadata["title"]
+        abstract = metadata["abstract"]
+        authors = metadata["authors"]
+        categories = metadata["categories"]
+        published_raw = metadata["published_raw"]
         published_iso = normalize_published(published_raw)
 
         if _is_cancelled(job_id):
             log.info(f"[Ingest] Job {job_id} cancelled after metadata fetch.")
             return
 
-        # Download PDF
-        actual_pdf_url = pdf_url or f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-        pdf_resp = requests.get(actual_pdf_url, timeout=120)
-        if pdf_resp.status_code != 200:
-            _update_job("failed", error=f"PDF download failed (HTTP {pdf_resp.status_code}).")
-            return
-
-        pdf_bytes = pdf_resp.content
-        if not pdf_bytes or len(pdf_bytes) < 1024:
-            _update_job("failed", error="PDF download returned empty or trivially small body.")
+        try:
+            pub_year = published_iso[:4] if published_iso else None
+            pdf_bytes, actual_pdf_url = _download_arxiv_pdf(arxiv_id, pdf_url, year=pub_year)
+        except Exception as exc:
+            _update_job("failed", error=str(exc)[:500])
             return
 
         _update_job("downloading", title=paper_title)
@@ -319,11 +470,13 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         _update_job("chunking")
         log.info(f"[Ingest] Chunking paper {arxiv_id}...")
 
-        # Extract text from PDF
-        import fitz  # PyMuPDF
-        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-        full_text = "\n".join(page.get_text() for page in doc)
-        doc.close()
+        # Extract text from PDF using the same extractor as the offline ingest path
+        # (PyMuPDF first, pdfplumber fallback).
+        from ingest.ingest_arxiv import extract_full_text_from_pdf
+
+        full_text = extract_full_text_from_pdf(pdf_bytes)
+        if full_text:
+            full_text = full_text.replace("\x00", "")
 
         if not full_text.strip():
             _update_job("failed", error="Could not extract text from PDF.")
@@ -452,6 +605,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
                     batch_size=INGEST_EMBED_BATCH_SIZE,
                     convert_to_numpy=True,
                     normalize_embeddings=True,
+                    show_progress_bar=False,
                 )
                 all_embeddings.append(batch_embs)
 
@@ -505,6 +659,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
                             batch_size=1,
                             convert_to_numpy=True,
                             normalize_embeddings=True,
+                            show_progress_bar=False,
                         )
                         doc_vec = demb[0].tolist()
                         doc_point = PointStruct(

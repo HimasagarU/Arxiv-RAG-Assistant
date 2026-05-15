@@ -184,15 +184,20 @@ export async function getSimilarPapers(paperId, topN = 5) {
 async function _consumeSSEStream(reader, onEvent) {
   const decoder = new TextDecoder();
   let buffer = '';
+  let currentEvent = null;
 
   while (true) {
     const { done, value } = await reader.read();
     if (done) {
-      if (buffer.trim()) {
-        const raw = buffer.replace(/^data:\s*/, '').trim();
+      const raw = buffer
+        .split('\n')
+        .find((line) => line.startsWith('data: '))
+        ?.slice(6)
+        .trim();
+      if (raw) {
         try {
           const payload = JSON.parse(raw);
-          onEvent(payload.type || 'done', payload);
+          onEvent(currentEvent || payload.type || 'done', payload);
         } catch {}
       }
       break;
@@ -202,8 +207,10 @@ async function _consumeSSEStream(reader, onEvent) {
     const lines = buffer.split('\n');
     buffer = lines.pop(); // keep incomplete last line
 
-    let currentEvent = null;
     for (const line of lines) {
+      if (!line.trim() || line.startsWith(':')) {
+        continue;
+      }
       if (line.startsWith('event: ')) {
         currentEvent = line.slice(7).trim();
       } else if (line.startsWith('data: ')) {

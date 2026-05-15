@@ -82,16 +82,19 @@ function LandingPage() {
         // Incorporate retrieval trace (if present) so we can show reranker/MMR stages
         const trace = meta.retrieval_trace || meta.trace || {};
         if (trace) {
-          // Rerank
+          if (progressStages.length === 0) {
+            updateProgress('Classifying intent');
+            if ((trace.query_variants || []).length > 1) updateProgress('Expanding query');
+            updateProgress('Dense vector search');
+            if (trace.parent_child?.active) updateProgress('Parent document expansion');
+            updateProgress('BM25 keyword search');
+            updateProgress('RRF fusion and filtering');
+          }
           const rerank = trace.rerank || {};
-          if (!rerank.skipped) updateProgress('Reranking (Cross-Encoder)');
-          // MMR
+          updateProgress(rerank.skipped ? 'Reranking skipped' : 'Reranking (Cross-Encoder)');
           const mmr = trace.mmr || {};
           if (mmr.enabled) updateProgress('MMR Diversity Filtering');
-          // Context compression indicator (best-effort)
-          if (trace.retrieval_ms !== undefined) {
-            updateProgress('Context Compression & Synthesis');
-          }
+          updateProgress('Context Compression & Synthesis');
         }
         // Advance to final stage when metadata arrives if not already there
         updateProgress('Synthesizing Answer');

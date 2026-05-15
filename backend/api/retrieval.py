@@ -532,7 +532,13 @@ class HybridRetriever:
 
     def _encode_query(self, query: str) -> list[float]:
         """Encode query for BGE model (no prefix needed)."""
-        emb = self.embed_model.encode([query], batch_size=1, convert_to_numpy=True, normalize_embeddings=True)
+        emb = self.embed_model.encode(
+            [query],
+            batch_size=1,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
         return emb[0].tolist()
 
     def _combine_candidate_lists(self, candidate_lists: list[list[dict]], score_key: str) -> list[dict]:
@@ -1447,13 +1453,23 @@ class HybridRetriever:
                       (used by document-scoped chat).
             dense_auxiliary_text: Optional HyDE-style passage; dense retrieval also encodes this string.
         """
-        if on_progress:
-            on_progress("Expanding query")
+        def emit(stage: str) -> None:
+            log.info("[RAG] %s", stage)
+            if on_progress:
+                on_progress(stage)
+
+        emit("Classifying intent")
         top_n = top_n or self.final_top_n
         intent = intent or classify_query_intent(query)
         is_paper_scoped = paper_id is not None
         trace = {"intent": intent, "paper_scoped": is_paper_scoped}
         t0 = time.time()
+        log.info(
+            "[RAG] Query started intent=%s top_n=%s paper_id=%s",
+            intent,
+            top_n,
+            paper_id or "-",
+        )
 
         params = INTENT_RETRIEVAL_PARAMS.get(intent, INTENT_RETRIEVAL_PARAMS[INTENT_DISCOVERY])
         trace["retrieval_params"] = {k: v for k, v in params.items() if k != "mmr_lambda"}
@@ -1479,6 +1495,7 @@ class HybridRetriever:
                 qs = " ".join((query or "").strip().split())
                 query_variants = [qs] if qs else []
             else:
+                emit("Expanding query")
                 query_variants = decompose_query(query, intent=intent, paper_scoped=is_paper_scoped)
 
             if intent in (INTENT_COMPARATIVE, INTENT_TECHNICAL, INTENT_SOTA) and not gate["restrict_embedding_expansion"]:
@@ -1517,8 +1534,7 @@ class HybridRetriever:
             qdrant_filter = self._build_qdrant_filter(
                 category=category, author=author, paper_id=paper_id
             )
-            if on_progress:
-                on_progress("Hybrid retrieval")
+            emit("Dense vector search")
 
             aux = [dense_auxiliary_text] if (dense_auxiliary_text or "").strip() else None
 
@@ -1531,6 +1547,7 @@ class HybridRetriever:
             q_emb = self._encode_query(query)
             pc_chunks, pc_trace = [], {"active": False, "skipped": retrieval_skip_parent_child()}
             if not retrieval_skip_parent_child():
+                emit("Parent document expansion")
                 pc_chunks, pc_trace = self._parent_child_chunk_candidates(
                     q_emb, qdrant_filter, paper_id
                 )
@@ -1547,6 +1564,7 @@ class HybridRetriever:
             trace["dense_count"] = len(dense_candidates)
 
             t2 = time.time()
+            emit("BM25 keyword search")
             if retrieval_skip_lexical():
                 lex_candidates = []
             else:
@@ -1571,6 +1589,7 @@ class HybridRetriever:
                 self.merge_top_m = max(self.merge_top_m, 160)
 
             t3 = time.time()
+            emit("RRF fusion and filtering")
             merged = self._merge_and_normalize(dense_candidates, lex_candidates, intent)
             merged = self._apply_citation_graph_boost(merged, trace, intent)
             if is_paper_scoped:
@@ -1600,6 +1619,7 @@ class HybridRetriever:
 
 
             if retrieval_skip_rerank():
+                emit("Reranking skipped")
                 pool = sorted(merged, key=lambda x: x.get("fusion_score", 0.0), reverse=True)[:rerank_cap]
                 reranked = []
                 for row in pool:
@@ -1608,12 +1628,11 @@ class HybridRetriever:
                     reranked.append(row)
                 trace["rerank"] = {"skipped": True, "reason": "RETRIEVAL_SKIP_RERANK"}
             else:
+                emit("Reranking (Cross-Encoder)")
                 reranked = self.reranker.rerank(
                     query, merged, top_n=rerank_cap, rerank_text_mode=rerank_mode
                 )
                 trace["rerank"] = dict(getattr(self.reranker, "last_trace", None) or {})
-            if on_progress:
-                on_progress("Reranking (Cross-Encoder)")
             if retrieval_skip_rerank():
                 reranked = self._apply_section_rerank_boost(reranked, intent)
                 if params.get("recency_calendar") and intent == INTENT_SOTA:
@@ -1640,8 +1659,7 @@ class HybridRetriever:
             )
             trace["mmr"] = {"enabled": bool(use_mmr)}
             if use_mmr:
-                if on_progress:
-                    on_progress("MMR Diversity Filtering")
+                emit("MMR Diversity Filtering")
                 reranked = self._apply_mmr(
                     reranked,
                     lambda_param=float(params["mmr_lambda"]),
@@ -1689,6 +1707,15 @@ class HybridRetriever:
             trace["total_ms"] = round((time.time() - t0) * 1000, 1)
             trace["filters"] = {"category": category, "author": author, "start_year": start_year}
             trace["unique_papers"] = len({p["paper_id"] for p in passages if p["paper_id"]})
+            log.info(
+                "[RAG] Query finished total_ms=%s dense=%s lex=%s merged=%s sources=%s rerank=%s",
+                trace["total_ms"],
+                trace.get("dense_count", 0),
+                trace.get("lex_count", 0),
+                trace.get("merged_count", 0),
+                len(passages),
+                trace.get("rerank", {}).get("last_call") or ("skipped" if trace.get("rerank", {}).get("skipped") else "unknown"),
+            )
 
             return {"passages": passages, "trace": trace, "analytics": analytics}
         finally:

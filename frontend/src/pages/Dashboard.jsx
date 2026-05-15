@@ -71,6 +71,7 @@ export default function Dashboard() {
       setArxivId('');
       setShowAddDoc(false);
       // Start polling
+      pollingJobsRef.current.add(job.id);
       pollJobStatus(job.id);
     } catch (err) {
       setAddError(err.message);
@@ -116,6 +117,25 @@ export default function Dashboard() {
     failed: { label: 'Failed', color: 'var(--color-error)', icon: '❌' },
     cancelled: { label: 'Cancelled', color: 'var(--color-text-muted)', icon: '⛔' },
   };
+
+  const ingestSteps = [
+    { key: 'queued', label: 'Queued' },
+    { key: 'downloading', label: 'Metadata + PDF' },
+    { key: 'chunking', label: 'Extract + chunk' },
+    { key: 'embedding', label: 'Embed + index' },
+    { key: 'done', label: 'Ready' },
+  ];
+
+  function ingestStepState(doc, stepKey, idx) {
+    if (doc.status === 'failed' || doc.status === 'cancelled') {
+      return doc.status === stepKey ? 'failed' : 'idle';
+    }
+    const currentIdx = ingestSteps.findIndex((s) => s.key === doc.status);
+    if (currentIdx === -1) return 'idle';
+    if (idx < currentIdx) return 'done';
+    if (idx === currentIdx) return doc.status === 'done' ? 'done' : 'active';
+    return 'idle';
+  }
 
   return (
     <PageShell>
@@ -326,6 +346,43 @@ export default function Dashboard() {
                             <div className="w-3 h-3 border border-t-transparent rounded-full"
                                  style={{ borderColor: cfg.color, borderTopColor: 'transparent', animation: 'spin-slow 1s linear infinite' }} />
                           )}
+                        </div>
+                        <div className="mt-3 space-y-1.5">
+                          {ingestSteps.map((step, idx) => {
+                            const stepState = ingestStepState(doc, step.key, idx);
+                            const isDone = stepState === 'done';
+                            const isActive = stepState === 'active';
+                            const isFailed = stepState === 'failed';
+                            return (
+                              <div key={step.key} className="flex items-center gap-2 text-[10px]">
+                                <div
+                                  className={`w-1.5 h-1.5 rounded-full ${isActive ? 'animate-pulse' : ''}`}
+                                  style={{
+                                    background: isFailed
+                                      ? 'var(--color-error)'
+                                      : isDone
+                                        ? 'var(--color-success)'
+                                        : isActive
+                                          ? cfg.color
+                                          : 'var(--color-border)',
+                                  }}
+                                />
+                                <span
+                                  style={{
+                                    color: isFailed
+                                      ? 'var(--color-error)'
+                                      : isDone
+                                        ? 'var(--color-success)'
+                                        : isActive
+                                          ? cfg.color
+                                          : 'var(--color-text-muted)',
+                                  }}
+                                >
+                                  {step.label}
+                                </span>
+                              </div>
+                            );
+                          })}
                         </div>
                         {doc.status === 'done' && doc.chunks_created > 0 && (
                           <p className="text-xs mt-1" style={{ color: 'var(--color-success)' }}>

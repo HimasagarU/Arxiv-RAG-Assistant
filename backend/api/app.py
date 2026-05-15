@@ -1472,8 +1472,7 @@ async def query_stream_endpoint(request: QueryRequest):
         trace = result["trace"]
         analytics = result.get("analytics", {})
         
-        if intent in (INTENT_TECHNICAL, INTENT_EXPLANATORY, INTENT_EVIDENCE, INTENT_SOTA):
-            yield f"data: {json.dumps({'type': 'status', 'stage': 'Context Compression & Synthesis'})}\n\n"
+        yield f"data: {json.dumps({'type': 'status', 'stage': 'Context Compression & Synthesis'})}\n\n"
 
         compressed_context = _state["retriever"].compress_context(
             request.query, passages, intent=intent

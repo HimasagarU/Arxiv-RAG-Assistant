@@ -368,6 +368,7 @@ async def chat_query_stream(
                 {"num_chunks": len(passages), "trace": trace},
             )
 
+            yield _sse_event("status", {"stage": "Context Compression & Synthesis"})
             compressed = await asyncio.to_thread(
                 _state["retriever"].compress_context,
                 body.query,
@@ -387,6 +388,7 @@ async def chat_query_stream(
             else:
                 prompt = build_prompt(body.query, compressed, passages, intent=intent)
 
+            yield _sse_event("status", {"stage": "Synthesizing Answer"})
             answer_parts: list[str] = []
             token_queue: asyncio.Queue = asyncio.Queue()
             sentinel = object()
