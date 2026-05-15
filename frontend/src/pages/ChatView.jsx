@@ -10,15 +10,6 @@ import { renderMarkdown } from '../utils/renderMarkdown';
 
 const MAX_QUERIES = 20;
 
-const PIPELINE_STEPS = [
-  { id: 'Expanding query',                   label: 'Expanding query variants…'           },
-  { id: 'Hybrid retrieval',                  label: 'Dense & Lexical retrieval…'          },
-  { id: 'Reranking (Cross-Encoder)',         label: 'Cross-encoder reranking…'           },
-  { id: 'MMR Diversity Filtering',           label: 'MMR diversity filter…'               },
-  { id: 'Context Compression & Synthesis',   label: 'Compressing context…'                },
-  { id: 'Synthesizing Answer',               label: 'Generating answer with Groq…'        },
-];
-
 // ── Memoized message components ─────────────────────────────
 
 const UserMessage = memo(function UserMessage({ content }) {
@@ -151,31 +142,39 @@ const AssistantMessage = memo(function AssistantMessage({ msg, msgIdx, streaming
 
         {msg.streaming && (
           <div className="mb-4 space-y-2">
+            <div className="flex items-center justify-between text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--color-text-muted)' }}>
+              <span>Live backend stages</span>
+              <span>{msg.currentStage || 'Waiting for first stage…'}</span>
+            </div>
             <div className="flex flex-wrap gap-2">
-              {PIPELINE_STEPS.map((step) => {
-                const stepIdx = PIPELINE_STEPS.findIndex(s => s.id === step.id);
-                const currentIdx = PIPELINE_STEPS.findIndex(s => s.id === msg.currentStage);
-                const isDone = currentIdx > stepIdx || msg.retrievalStatus === 'done';
-                const isActive = msg.currentStage === step.id && msg.retrievalStatus !== 'done';
-                
-                if (!isDone && !isActive && stepIdx > (currentIdx >= 0 ? currentIdx + 1 : 0)) return null;
+              {(msg.progressStages || []).length === 0 ? (
+                <div className="flex items-center gap-2 px-2 py-1 rounded-md text-[10px] font-medium border" style={{ color: 'var(--color-text-muted)', borderColor: 'var(--color-border)' }}>
+                  <div className="w-1.5 h-1.5 rounded-full bg-[var(--color-border)]" />
+                  Waiting for retrieval progress…
+                </div>
+              ) : (
+                (msg.progressStages || []).map((stage, idx) => {
+                  const currentIdx = (msg.progressStages || []).lastIndexOf(msg.currentStage);
+                  const isActive = stage === msg.currentStage;
+                  const isDone = currentIdx !== -1 && idx < currentIdx;
 
-                return (
-                  <div 
-                    key={step.id} 
-                    className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium transition-all border"
-                    style={{ 
-                      background: isDone ? 'rgba(16, 185, 129, 0.1)' : isActive ? 'var(--color-bg-hover)' : 'transparent',
-                      color: isDone ? 'var(--color-success)' : isActive ? 'var(--color-accent)' : 'var(--color-text-muted)',
-                      borderColor: isDone ? 'rgba(16, 185, 129, 0.2)' : isActive ? 'var(--color-accent)' : 'var(--color-border)',
-                      opacity: isDone || isActive ? 1 : 0.5
-                    }}
-                  >
-                    <div className={`w-1.5 h-1.5 rounded-full ${isDone ? 'bg-[var(--color-success)]' : isActive ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-[var(--color-text-muted)]'}`} />
-                    {step.label}
-                  </div>
-                );
-              })}
+                  return (
+                    <div
+                      key={`${stage}-${idx}`}
+                      className="flex items-center gap-1.5 px-2 py-1 rounded-md text-[10px] font-medium transition-all border"
+                      style={{
+                        background: isDone ? 'rgba(16, 185, 129, 0.1)' : isActive ? 'var(--color-bg-hover)' : 'transparent',
+                        color: isDone ? 'var(--color-success)' : isActive ? 'var(--color-accent)' : 'var(--color-text-muted)',
+                        borderColor: isDone ? 'rgba(16, 185, 129, 0.2)' : isActive ? 'var(--color-accent)' : 'var(--color-border)',
+                        opacity: isDone || isActive ? 1 : 0.7,
+                      }}
+                    >
+                      <div className={`w-1.5 h-1.5 rounded-full ${isDone ? 'bg-[var(--color-success)]' : isActive ? 'bg-[var(--color-accent)] animate-pulse' : 'bg-[var(--color-text-muted)]'}`} />
+                      {stage}
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         )}
@@ -280,7 +279,8 @@ export default function ChatView() {
       sources_json: null,
       id: asstMsgId,
       retrievalStatus: 'searching',
-      currentStage: PIPELINE_STEPS[0].id,
+      currentStage: '',
+      progressStages: [],
       retrievalChunks: null,
       streaming: true,
     }]);
@@ -306,7 +306,11 @@ export default function ChatView() {
 
       onStatus: (stage) => {
         setMessages((prev) => prev.map((m) =>
-          m.id === asstMsgId ? { ...m, currentStage: stage } : m
+          m.id === asstMsgId ? {
+            ...m,
+            currentStage: stage,
+            progressStages: m.progressStages?.includes(stage) ? m.progressStages : [...(m.progressStages || []), stage],
+          } : m
         ));
       },
 
@@ -336,7 +340,7 @@ export default function ChatView() {
         const sourcesJson = JSON.stringify(sources);
         setMessages((prev) => prev.map((m) =>
           m.id === asstMsgId
-            ? { ...m, sources_json: sourcesJson, streaming: false, retrievalStatus: 'done' }
+            ? { ...m, sources_json: sourcesJson, streaming: false, retrievalStatus: 'done', currentStage: null }
             : m
         ));
         // Refresh conversation list (title auto-set after first message)

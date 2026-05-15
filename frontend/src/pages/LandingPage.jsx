@@ -6,17 +6,6 @@ import { PageHeader, PageShell } from '../components/PageShell';
 import { renderMarkdown } from '../utils/renderMarkdown';
 import { streamPublicQuery } from '../api';
 
-// Real retrieval steps that match the backend pipeline order.
-// Shown in sequence during loading; the stream metadata updates them.
-const PIPELINE_STEPS = [
-  { id: 'Expanding query',                   label: 'Expanding query variants…'           },
-  { id: 'Hybrid retrieval',                  label: 'Dense & Lexical retrieval…'          },
-  { id: 'Reranking (Cross-Encoder)',         label: 'BGE-Reranker-Base…'                 },
-  { id: 'MMR Diversity Filtering',           label: 'MMR diversity filter…'               },
-  { id: 'Context Compression & Synthesis',   label: 'Compressing context…'                },
-  { id: 'Synthesizing Answer',               label: 'Generating answer with Groq…'        },
-];
-
 function LandingPage() {
   const { user } = useAuth();
   const [query, setQuery]           = useState('');
@@ -25,8 +14,8 @@ function LandingPage() {
   const [filterAuthor, setFilterAuthor] = useState('');
 
   const [loading, setLoading]   = useState(false);
-  const [activeStep, setActiveStep] = useState(-1);
-  const [doneSteps, setDoneSteps]   = useState(new Set());
+  const [progressStages, setProgressStages] = useState([]);
+  const [currentStage, setCurrentStage] = useState('');
 
   const [streamingText, setStreamingText]   = useState('');
   const [sources, setSources]               = useState([]);
@@ -59,18 +48,9 @@ function LandingPage() {
   }, [API_BASE]);
 
   function updateProgress(stage) {
-    const stepIdx = PIPELINE_STEPS.findIndex(s => s.id === stage);
-    if (stepIdx !== -1) {
-      setActiveStep(stepIdx);
-      // Mark all previous steps as done
-      setDoneSteps(prev => {
-        const next = new Set(prev);
-        for (let i = 0; i < stepIdx; i++) {
-          next.add(PIPELINE_STEPS[i].id);
-        }
-        return next;
-      });
-    }
+    if (!stage) return;
+    setCurrentStage(stage);
+    setProgressStages((prev) => (prev.includes(stage) ? prev : [...prev, stage]));
   }
 
   const submitQuery = async () => {
@@ -82,6 +62,8 @@ function LandingPage() {
     setSources([]);
     setStreamingText('');
     setSources([]);
+    setProgressStages([]);
+    setCurrentStage('');
 
     let metaReceived = false;
 
@@ -118,7 +100,7 @@ function LandingPage() {
         setStreaming(false);
         if (finalSources?.length) setSources(finalSources);
         setLoading(false);
-        setActiveStep(-1);
+        setCurrentStage('');
       },
     });
 
@@ -250,32 +232,45 @@ function LandingPage() {
         {/* Pipeline Progress */}
         {loading && (
           <div className="flex flex-col gap-2 mb-6 text-sm max-w-md mx-auto bg-[var(--color-bg-card)] p-4 rounded-lg border border-[var(--color-border)] shadow-sm">
-            {PIPELINE_STEPS.map((step, i) => {
-              const done = doneSteps.has(step.id);
-              const active = i === activeStep;
-              return (
-                <div key={step.id} className={`flex items-center gap-3 transition-colors ${
-                  active ? 'text-[var(--color-accent)] font-medium' :
-                  done   ? 'text-[var(--color-success)]' :
-                           'text-[var(--color-text-muted)]'
-                }`}>
-                  <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
-                    active ? 'bg-[var(--color-accent)] animate-pulse' :
-                    done   ? 'bg-[var(--color-success)]' :
-                             'bg-[var(--color-border)]'
-                  }`} />
-                  <span className="flex-1 text-xs">{step.label}</span>
-                  {active && (
-                    <div className="w-3 h-3 border-2 border-t-transparent border-[var(--color-accent)] rounded-full animate-spin ml-auto flex-shrink-0" />
-                  )}
-                  {done && (
-                    <svg className="w-3 h-3 text-[var(--color-success)] ml-auto flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
-                    </svg>
-                  )}
-                </div>
-              );
-            })}
+            <div className="flex items-center justify-between text-xs uppercase tracking-[0.16em]" style={{ color: 'var(--color-text-muted)' }}>
+              <span>Live backend stages</span>
+              <span>{currentStage || 'Waiting for first stage…'}</span>
+            </div>
+            {progressStages.length === 0 ? (
+              <div className="flex items-center gap-3 text-[var(--color-text-muted)]">
+                <div className="w-2 h-2 rounded-full bg-[var(--color-border)]" />
+                <span className="flex-1 text-xs">No progress event yet</span>
+                <div className="w-3 h-3 border-2 border-t-transparent border-[var(--color-accent)] rounded-full animate-spin ml-auto flex-shrink-0" />
+              </div>
+            ) : (
+              progressStages.map((stage, i) => {
+                const currentIdx = progressStages.lastIndexOf(currentStage);
+                const active = stage === currentStage;
+                const done = currentIdx !== -1 && i < currentIdx;
+                return (
+                  <div key={`${stage}-${i}`} className={`flex items-center gap-3 transition-colors ${
+                    active ? 'text-[var(--color-accent)] font-medium' :
+                    done   ? 'text-[var(--color-success)]' :
+                             'text-[var(--color-text-muted)]'
+                  }`}>
+                    <div className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                      active ? 'bg-[var(--color-accent)] animate-pulse' :
+                      done   ? 'bg-[var(--color-success)]' :
+                               'bg-[var(--color-border)]'
+                    }`} />
+                    <span className="flex-1 text-xs">{stage}</span>
+                    {active && (
+                      <div className="w-3 h-3 border-2 border-t-transparent border-[var(--color-accent)] rounded-full animate-spin ml-auto flex-shrink-0" />
+                    )}
+                    {done && (
+                      <svg className="w-3 h-3 text-[var(--color-success)] ml-auto flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                      </svg>
+                    )}
+                  </div>
+                );
+              })
+            )}
           </div>
         )}
 
