@@ -332,6 +332,22 @@ def _bm25_tokenize(text: str) -> list[str]:
     """
     return re.sub(r"[^\w\s]", "", text.lower()).split()
 
+
+def _bm25_doc_count(bm25) -> int:
+    """Return the number of documents represented by a rank_bm25 index."""
+    if bm25 is None:
+        return 0
+    corpus_size = getattr(bm25, "corpus_size", None)
+    if isinstance(corpus_size, int):
+        return corpus_size
+    doc_len = getattr(bm25, "doc_len", None)
+    if doc_len is not None:
+        try:
+            return len(doc_len)
+        except TypeError:
+            pass
+    return 0
+
 # ---------------------------------------------------------------------------
 # HybridRetriever
 # ---------------------------------------------------------------------------
@@ -437,7 +453,18 @@ class HybridRetriever:
             
         try:
             self.bm25 = joblib.load(data_dir / "bm25_v1.pkl")
-            log.info("BM25 index loaded successfully.")
+            bm25_docs = _bm25_doc_count(self.bm25)
+            if self.chunks_meta and bm25_docs and bm25_docs != len(self.chunks_meta):
+                log.warning(
+                    "BM25 artifact mismatch: bm25 has %s docs but chunks_meta has %s rows. "
+                    "Disabling lexical retrieval until BM25 artifacts are rebuilt together.",
+                    bm25_docs,
+                    len(self.chunks_meta),
+                )
+                self.bm25 = None
+                self.bm25_dirty = True
+            else:
+                log.info("BM25 index loaded successfully (%s docs).", bm25_docs or "unknown")
         except Exception as e:
             log.warning(f"Could not load bm25_v1.pkl: {e}")
 
@@ -459,7 +486,7 @@ class HybridRetriever:
             
         log.info("HybridRetriever ready (Memory-Optimized: Text will be fetched from Qdrant).")
 
-    def add_paper(self, paper_meta: dict, chunks: list[dict]):
+    def add_paper(self, paper_meta: dict, chunks: list[dict], persist: bool = True):
         """Dynamically add a new paper to the in-memory retriever structures."""
         paper_id = paper_meta["paper_id"]
         
@@ -493,6 +520,9 @@ class HybridRetriever:
         if self.bm25:
             self.bm25_dirty = True
             log.warning("BM25 artifacts are now stale; rebuild BM25 to index new papers.")
+
+        if not persist:
+            return
 
         # 4. Persist to local artifact files to survive restarts
         try:
@@ -928,13 +958,36 @@ class HybridRetriever:
         if not self.bm25 or not self.chunks_meta:
             return []
 
+        bm25_docs = _bm25_doc_count(self.bm25)
+        if bm25_docs and bm25_docs != len(self.chunks_meta):
+            log.warning(
+                "Skipping BM25 lexical retrieval because artifacts are inconsistent "
+                "(bm25_docs=%s, chunks_meta=%s). Dense retrieval will continue.",
+                bm25_docs,
+                len(self.chunks_meta),
+            )
+            self.bm25 = None
+            self.bm25_dirty = True
+            return []
+
         variants = query_variants or [query]
         score_accumulator = np.zeros(len(self.chunks_meta), dtype=float)
         for variant in variants:
             tokens = re.sub(r'[^\w\s]', '', variant.lower()).split()
             if not tokens:
                 continue
-            score_accumulator = np.maximum(score_accumulator, self.bm25.get_scores(tokens))
+            scores = self.bm25.get_scores(tokens)
+            if len(scores) != len(score_accumulator):
+                log.warning(
+                    "Skipping BM25 lexical retrieval due to score length mismatch "
+                    "(scores=%s, chunks_meta=%s). Dense retrieval will continue.",
+                    len(scores),
+                    len(score_accumulator),
+                )
+                self.bm25 = None
+                self.bm25_dirty = True
+                return []
+            score_accumulator = np.maximum(score_accumulator, scores)
 
         k = min(self.k_lex * 5, len(score_accumulator))
         if k == 0:

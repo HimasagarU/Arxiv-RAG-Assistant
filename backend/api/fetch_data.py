@@ -19,6 +19,50 @@ def _sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _count_jsonl(path: Path) -> int:
+    if not path.exists():
+        return 0
+    count = 0
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            if line.strip():
+                count += 1
+    return count
+
+
+def _bm25_doc_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    try:
+        import joblib
+
+        bm25 = joblib.load(path)
+        corpus_size = getattr(bm25, "corpus_size", None)
+        if isinstance(corpus_size, int):
+            return corpus_size
+        doc_len = getattr(bm25, "doc_len", None)
+        return len(doc_len) if doc_len is not None else 0
+    except Exception as exc:
+        log.warning("Could not inspect local BM25 artifact: %s", exc)
+        return 0
+
+
+def _local_artifacts_consistent(dest_dir: Path) -> bool:
+    bm25_docs = _bm25_doc_count(dest_dir / "bm25_v1.pkl")
+    meta_rows = _count_jsonl(dest_dir / "chunks_meta.jsonl")
+    if not bm25_docs or not meta_rows:
+        return False
+    if bm25_docs != meta_rows:
+        log.warning(
+            "Local artifact mismatch: bm25 has %s docs but chunks_meta has %s rows. "
+            "Will refresh from R2.",
+            bm25_docs,
+            meta_rows,
+        )
+        return False
+    return True
+
+
 def fetch_and_extract():
     # --- Config from Environment ---
     R2_ACCOUNT_ID = os.getenv("R2_ACCOUNT_ID")
@@ -55,7 +99,11 @@ def fetch_and_extract():
 
         if local_sha_path.exists():
             local_sha = local_sha_path.read_text(encoding="utf-8").strip().split()[0]
-            if local_sha == remote_sha and (DEST_DIR / "bm25_v1.pkl").exists():
+            if (
+                local_sha == remote_sha
+                and (DEST_DIR / "bm25_v1.pkl").exists()
+                and _local_artifacts_consistent(DEST_DIR)
+            ):
                 log.info("Local artifacts match remote checksum. Skipping download.")
                 return
 

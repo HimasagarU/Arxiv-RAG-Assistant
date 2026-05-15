@@ -18,6 +18,8 @@ import sys
 import threading
 import types
 import time
+import hashlib
+import zipfile
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
@@ -34,6 +36,7 @@ from api.auth import get_current_user
 from api.cache import bump_query_cache_buster_sync
 from db.app_database import get_app_db
 from db.app_models import DocumentJob, User
+from index.lexical_text import build_lexical_index_text
 from utils.ids import chunk_id_to_uuid, normalize_arxiv_paper_id, paper_id_to_uuid
 from utils.metadata_normalize import normalize_published
 from utils.section_labels import normalize_section_label
@@ -47,6 +50,8 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 JOB_ACTIVE_STATUSES = frozenset({"queued", "downloading", "chunking", "embedding"})
 JOB_TERMINAL_STATUSES = frozenset({"done", "failed", "cancelled"})
 ARXIV_EXPORT_API = "https://export.arxiv.org/api/query"
+ARTIFACT_BUNDLE_FILES = ("bm25_v1.pkl", "chunks_meta.jsonl", "chunks_text.jsonl", "papers_meta.json")
+_artifact_update_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +195,180 @@ def _rebuild_bm25_safe():
         raise
 
 
+def _tokenize_for_bm25(text: str) -> list[str]:
+    return re.sub(r"[^\w\s]", "", (text or "").lower()).split()
+
+
+def _chunk_meta_record(chunk: dict) -> dict:
+    return {
+        "chunk_id": chunk["chunk_id"],
+        "paper_id": chunk["paper_id"],
+        "title": chunk.get("title", ""),
+        "authors": chunk.get("authors", ""),
+        "categories": chunk.get("categories", ""),
+        "chunk_type": chunk.get("chunk_type", "text"),
+        "modality": chunk.get("modality", "text"),
+        "section_hint": normalize_section_label(chunk.get("section_hint", "other")),
+        "layer": chunk.get("layer", "core"),
+        "chunk_index": chunk.get("chunk_index", 0),
+        "total_chunks": chunk.get("total_chunks", 1),
+        "chunk_source": chunk.get("chunk_source", "full_text"),
+    }
+
+
+def _chunk_text_record(chunk: dict) -> dict:
+    chunk_norm = {
+        **chunk,
+        "section_hint": normalize_section_label(chunk.get("section_hint", "other")),
+    }
+    lexical_doc = build_lexical_index_text(chunk_norm)
+    return {
+        "chunk_id": chunk["chunk_id"],
+        "text": chunk.get("chunk_text", ""),
+        "contextual_text": chunk.get("contextual_text", chunk.get("chunk_text", "")),
+        "lexical_index_text": lexical_doc,
+    }
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _upload_artifact_bundle_to_r2(data_dir: Path) -> bool:
+    """Zip refreshed retrieval artifacts and upload the bundle/checksum to R2."""
+    from ingest.r2_storage import R2Storage
+
+    r2 = R2Storage()
+    if not r2.is_available:
+        log.warning("[Ingest] R2 unavailable; refreshed BM25 artifacts remain local only.")
+        return False
+
+    zip_name = os.getenv("ARTIFACT_ZIP_NAME", "artifacts_v1.zip")
+    zip_path = data_dir / zip_name
+    sha_path = data_dir / f"{zip_name}.sha256"
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        for name in ARTIFACT_BUNDLE_FILES:
+            path = data_dir / name
+            if not path.exists():
+                raise FileNotFoundError(f"Cannot upload artifact bundle; missing {path}")
+            zipf.write(path, arcname=name)
+
+    digest = _sha256_file(zip_path)
+    sha_path.write_text(digest + "\n", encoding="utf-8")
+
+    zip_key = r2.upload_bytes(zip_name, zip_path.read_bytes(), content_type="application/zip")
+    sha_key = r2.upload_bytes(sha_path.name, sha_path.read_bytes(), content_type="text/plain")
+    if zip_key and sha_key:
+        log.info("[Ingest] Uploaded refreshed artifact bundle to R2: %s", zip_name)
+        return True
+    log.warning("[Ingest] Artifact bundle upload to R2 was incomplete.")
+    return False
+
+
+def _refresh_bm25_artifacts_with_new_chunks(paper_meta: dict, chunks: list[dict]) -> bool:
+    """Append new chunks to the full local R2 artifact set, rebuild BM25, and upload it."""
+    from rank_bm25 import BM25Okapi
+    from utils.artifact_schema import write_artifact_manifest
+
+    with _artifact_update_lock:
+        data_dir = Path(os.getenv("DATA_DIR", "data"))
+        data_dir.mkdir(parents=True, exist_ok=True)
+
+        required = [data_dir / "chunks_meta.jsonl", data_dir / "chunks_text.jsonl", data_dir / "papers_meta.json"]
+        missing = [str(p) for p in required if not p.exists()]
+        if missing:
+            log.warning("[Ingest] Cannot refresh BM25 artifacts; missing full local artifacts: %s", ", ".join(missing))
+            return False
+
+        text_by_chunk: dict[str, dict] = {}
+        with open(data_dir / "chunks_text.jsonl", "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                cid = rec.get("chunk_id")
+                if cid:
+                    text_by_chunk[cid] = rec
+
+        new_chunk_ids = {c["chunk_id"] for c in chunks}
+        meta_records: list[dict] = []
+        with open(data_dir / "chunks_meta.jsonl", "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                if rec.get("chunk_id") not in new_chunk_ids:
+                    meta_records.append(rec)
+
+        for chunk in chunks:
+            text_by_chunk[chunk["chunk_id"]] = _chunk_text_record(chunk)
+            meta_records.append(_chunk_meta_record(chunk))
+
+        papers_path = data_dir / "papers_meta.json"
+        with open(papers_path, "r", encoding="utf-8") as f:
+            papers_meta = json.load(f)
+        paper_id = paper_meta["paper_id"]
+        existing_paper = papers_meta.get(paper_id, {})
+        papers_meta[paper_id] = {
+            **existing_paper,
+            "title": paper_meta.get("title", existing_paper.get("title", "")),
+            "authors": paper_meta.get("authors", existing_paper.get("authors", "")),
+            "categories": paper_meta.get("categories", existing_paper.get("categories", "")),
+            "published": normalize_published(paper_meta.get("published")) or existing_paper.get("published", ""),
+            "layer": paper_meta.get("layer", existing_paper.get("layer", "core")),
+            "pdf_url": paper_meta.get("pdf_url", existing_paper.get("pdf_url", "")),
+        }
+
+        corpus_tokens: list[list[str]] = []
+        tmp_meta = (data_dir / "chunks_meta.jsonl").with_suffix(".jsonl.tmp")
+        tmp_text = (data_dir / "chunks_text.jsonl").with_suffix(".jsonl.tmp")
+        tmp_papers = papers_path.with_suffix(".json.tmp")
+        tmp_bm25 = (data_dir / "bm25_v1.pkl").with_suffix(".pkl.tmp")
+
+        with open(tmp_meta, "w", encoding="utf-8") as f_meta, open(tmp_text, "w", encoding="utf-8") as f_text:
+            for meta in meta_records:
+                cid = meta.get("chunk_id")
+                text_rec = text_by_chunk.get(cid, {})
+                lexical_doc = text_rec.get("lexical_index_text") or text_rec.get("contextual_text") or text_rec.get("text", "")
+                corpus_tokens.append(_tokenize_for_bm25(lexical_doc))
+                f_meta.write(json.dumps(meta, default=str) + "\n")
+                f_text.write(json.dumps(text_rec, default=str) + "\n")
+
+        with open(tmp_papers, "w", encoding="utf-8") as f:
+            json.dump(papers_meta, f, indent=2, default=str)
+
+        log.info("[Ingest] Rebuilding BM25 over %s full artifact chunks...", len(corpus_tokens))
+        import joblib
+        joblib.dump(BM25Okapi(corpus_tokens), tmp_bm25, compress=3)
+
+        tmp_meta.replace(data_dir / "chunks_meta.jsonl")
+        tmp_text.replace(data_dir / "chunks_text.jsonl")
+        tmp_papers.replace(papers_path)
+        tmp_bm25.replace(data_dir / "bm25_v1.pkl")
+
+        write_artifact_manifest(
+            data_dir,
+            extra={
+                "bm25_path": "bm25_v1.pkl",
+                "chunks_meta": "chunks_meta.jsonl",
+                "chunks_text": "chunks_text.jsonl",
+                "papers_meta": "papers_meta.json",
+                "chunk_count": len(corpus_tokens),
+                "paper_count": len(papers_meta),
+                "lexical_fields": ["title", "authors", "categories", "section", "body"],
+            },
+        )
+
+        _upload_artifact_bundle_to_r2(data_dir)
+        log.info("[Ingest] BM25 artifacts refreshed with %s new chunks.", len(chunks))
+        return True
+
+
 def _hot_reload_bm25_into_retriever():
     try:
         from api.app import _state
@@ -201,7 +380,22 @@ def _hot_reload_bm25_into_retriever():
 
         bm25_path = Path(os.getenv("DATA_DIR", "data")) / "bm25_v1.pkl"
         if bm25_path.is_file():
-            r.bm25 = joblib.load(bm25_path)
+            bm25 = joblib.load(bm25_path)
+            bm25_docs = getattr(bm25, "corpus_size", None)
+            if not isinstance(bm25_docs, int):
+                doc_len = getattr(bm25, "doc_len", None)
+                bm25_docs = len(doc_len) if doc_len is not None else 0
+            meta_docs = len(getattr(r, "chunks_meta", []) or [])
+            if bm25_docs and meta_docs and bm25_docs != meta_docs:
+                r.bm25 = None
+                r.bm25_dirty = True
+                log.warning(
+                    "[Ingest] Refusing BM25 hot-reload: bm25 has %s docs but chunks_meta has %s rows.",
+                    bm25_docs,
+                    meta_docs,
+                )
+                return
+            r.bm25 = bm25
             r.bm25_dirty = False
             log.info("[Ingest] Hot-reloaded BM25 from %s", bm25_path)
     except Exception as ex:
@@ -693,7 +887,7 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         try:
             from api.app import _state
             if _state.get("retriever") is not None:
-                _state["retriever"].add_paper(paper_dict, chunks)
+                _state["retriever"].add_paper(paper_dict, chunks, persist=False)
                 log.info("[Ingest] Updated in-memory HybridRetriever metadata for %s", arxiv_id)
         except Exception as e:
             log.warning("[Ingest] In-memory retriever update failed (non-fatal): %s", e)
@@ -706,14 +900,21 @@ def _run_ingestion(job_id: str, arxiv_id: str, pdf_url: Optional[str] = None):
         log.info(f"[Ingest] Paper {arxiv_id} ingestion complete ({len(chunks)} chunks).")
         bump_query_cache_buster_sync()
 
-        def _rebuild_bm25():
-            try:
-                _rebuild_bm25_safe()
-                _hot_reload_bm25_into_retriever()
-            except Exception:
-                pass
+        if os.getenv("INGEST_UPDATE_BM25_ARTIFACTS", "true").lower() in ("1", "true", "yes"):
+            def _refresh_bm25_artifacts():
+                try:
+                    refreshed = _refresh_bm25_artifacts_with_new_chunks(paper_dict, chunks)
+                    if refreshed:
+                        _hot_reload_bm25_into_retriever()
+                except Exception as exc:
+                    log.warning("[Ingest] BM25/R2 artifact refresh failed: %s", exc)
 
-        threading.Thread(target=_rebuild_bm25, daemon=True).start()
+            threading.Thread(target=_refresh_bm25_artifacts, daemon=True).start()
+        else:
+            log.info(
+                "[Ingest] Skipping BM25/R2 artifact refresh after on-demand ingest "
+                "(INGEST_UPDATE_BM25_ARTIFACTS=false)."
+            )
 
     except Exception as e:
         log.error(f"[Ingest] Fatal error for {arxiv_id}: {e}")
